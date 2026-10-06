@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.2.2 — October 6, 2026
+
+- Process discovered media between small batches of folder discovery so thumbnails and review results can appear before the whole folder tree is listed.
+- Keep pending work and completed checkpoints in the database, prioritize already discovered media when resuming, and limit retained directory iterators.
+
 ## 3.2.1 — October 6, 2026
 
 - Raised the estimated database size limit for adding Evidence originals to 2.5 GB by default.

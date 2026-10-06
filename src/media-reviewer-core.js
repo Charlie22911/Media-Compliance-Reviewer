@@ -893,7 +893,7 @@
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.1', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.2', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -921,7 +921,7 @@
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.2.1', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.2.2', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -988,11 +988,12 @@
 
   async function recordStore(database, kind, limit = 256) {return await MediaDatabase.recordStore(database, kind, limit);}
   async function scanJournal(database, scanId, rootId) {
+    await database.run('CREATE INDEX IF NOT EXISTS scan_jobs_pending_kind ON scan_jobs(scan_id,state,kind,seq)');
     await database.run("UPDATE scan_jobs SET state='pending' WHERE scan_id=? AND state IN ('processing','failed')", [scanId]);
     let seq = Number((await database.exec('SELECT COALESCE(MAX(seq),0) FROM scan_jobs WHERE scan_id=?', [scanId]))[0]?.values[0][0] || 0);
     return {
       async add(path, kind) {database.enqueue('INSERT OR IGNORE INTO scan_jobs(scan_id,seq,root_id,path,kind,state) VALUES (?,?,?,?,?,?)', [scanId, ++seq, rootId, path, kind, 'pending']);if (database.pending.length >= 32) await database.flush();},
-      async next() {const row = (await database.exec("SELECT seq,path,kind FROM scan_jobs WHERE scan_id=? AND state='pending' ORDER BY seq LIMIT 1", [scanId]))[0]?.values[0];return row ? { seq: row[0], path: row[1], kind: row[2] } : null;},
+      async next(kind = null) {const row = (await database.exec("SELECT seq,path,kind FROM scan_jobs WHERE scan_id=? AND state='pending'" + (kind ? ' AND kind=?' : '') + ' ORDER BY seq' + (kind === 'directory' ? ' DESC' : '') + ' LIMIT 1', kind ? [scanId, kind] : [scanId]))[0]?.values[0];return row ? { seq: row[0], path: row[1], kind: row[2] } : null;},
       async start(seq) {await database.run("UPDATE scan_jobs SET state='processing' WHERE scan_id=? AND seq=?", [scanId, seq]);},
       async finish(seq, state, occurrenceId = null, error = null) {await database.run('UPDATE scan_jobs SET state=?,occurrence_id=?,error=? WHERE scan_id=? AND seq=?', [state, occurrenceId, error, scanId, seq]);},
       async count() {return Number((await database.exec('SELECT COUNT(*) FROM scan_jobs WHERE scan_id=?', [scanId]))[0]?.values[0][0] || 0);}

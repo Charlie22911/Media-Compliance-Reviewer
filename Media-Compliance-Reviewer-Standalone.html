@@ -2314,7 +2314,7 @@ destination according to your evidence-handling requirements. Stored Evidence re
 files in folders you select.</p>
 <dl class="about-details">
 <dt>Version</dt>
-<dd>3.2.1</dd>
+<dd>3.2.2</dd>
 <dt>Authored by</dt>
 <dd>IT1 McPherson, Charlie</dd>
 <dt>Release date</dt>
@@ -2327,7 +2327,8 @@ user. Processing stays on the local computer unless the selected folder or datab
 <button id="decoder-license-button" class="small">Decoder license</button>
 <button id="database-license-button" class="small">Database license</button>
 <h3>Change log</h3>
-<details class="change-entry" open><summary>Version 3.2.1 · October 6, 2026</summary><ul><li>Raised the estimated database size limit for adding Evidence originals to 2.5 GB by default, with a 5 GB option in Maintenance. The choice is saved with each database. Normal scans can continue beyond this threshold while browser storage is available.</li></ul></details>
+<details class="change-entry" open><summary>Version 3.2.2 · October 6, 2026</summary><ul><li>Process discovered media between small batches of folder discovery so thumbnails and review results can appear before the whole folder tree is listed.</li><li>Keep pending work and completed checkpoints in the database, prioritize already discovered media when resuming, and limit retained directory iterators.</li></ul></details>
+<details class="change-entry"><summary>Version 3.2.1 · October 6, 2026</summary><ul><li>Raised the estimated database size limit for adding Evidence originals to 2.5 GB by default, with a 5 GB option in Maintenance. The choice is saved with each database. Normal scans can continue beyond this threshold while browser storage is available.</li></ul></details>
 <details class="change-entry"><summary>Version 3.2.0 · October 6, 2026</summary><ul><li>Added offline video-poster decoding when the browser cannot decode a video, including HEVC MOV.</li><li>Keep saved image thumbnails and video posters in the database for review after the source is disconnected. Sorting reloads these saved previews.</li><li>Added preview recovery for camera RAW files that contain a readable embedded JPEG and a browser-image fallback for formats such as SVG.</li></ul></details>
 <details class="change-entry"><summary>Version 3.1.2 · October 6, 2026</summary><ul><li>Made scan date, oldest first, the default result order.</li><li>Refresh displayed previews and retry missing previews when the sort order changes. Preview rebuilding no longer delays result sorting or page changes.</li><li>Added a separate progress window while opening and checking a database.</li></ul></details>
 <details class="change-entry"><summary>Version 3.1.1 · October 6, 2026</summary><ul><li>Kept database information visible while its item count and size refresh during scanning and saving.</li></ul></details>
@@ -2604,6 +2605,7 @@ user. Processing stays on the local computer unless the selected folder or datab
 <li><strong>Large database or slow operation:</strong> the working database uses browser disk storage with limited caches. Opening and saving large databases can still take time; watch the progress indicator. Original-image decoding can use substantial memory. Allow enough free disk space for the working copy and a saved snapshot. Evidence capture checks the estimated database size before adding an original. The default threshold is 2.5 GB; choose 5 GB under Maintenance → Database size limit for Evidence to allow larger captures. This choice is saved with the database. Normal scans can continue beyond this threshold while browser storage is available.</li>
 </ul>
 <h3>Privacy and storage</h3>
+<p>Folder discovery and media processing alternate in small batches. Matching files are fingerprinted and their previews are created while other folders remain to be discovered. Counts grow as discovery continues. Resume skips completed file jobs and completed folders; an interrupted folder may be listed again.</p>
 <p id="help-working-storage">The browser keeps a working copy locally. Database queries and writes run in a background worker; file fingerprints also run in a worker. The portable database file is updated when saving finishes. Wait for the saving indicator to disappear before closing, moving the file, or opening it on another computer.</p><p>Browser storage is not a backup. Clearing browser data or using a different browser can remove access to the working copy. Save the portable database file regularly. Standalone browser recovery, when offered, uses a locally saved snapshot; Forge requires reopening the saved database file. Use a browser that supports IndexedDB and allow enough free disk space.</p>
 <p>The app runs offline without automatic network requests or downloads. Files selected from a network share are still read through that share. External links in the About license sections open websites when clicked. The database holds review records, saved previews, scan progress, and encrypted Evidence; ordinary items do not include a stored copy of the full original.</p>
 <p>Use one active writer per shared database. The app checks for outside changes before saving, but this is not a substitute for coordinating access. Reviewer labels are self-reported, and local history is not a tamper-proof chain of custody.</p>
@@ -4037,7 +4039,7 @@ Library.
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.1', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.2', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -4065,7 +4067,7 @@ Library.
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.2.1', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.2.2', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -4132,11 +4134,12 @@ Library.
 
   async function recordStore(database, kind, limit = 256) {return await MediaDatabase.recordStore(database, kind, limit);}
   async function scanJournal(database, scanId, rootId) {
+    await database.run('CREATE INDEX IF NOT EXISTS scan_jobs_pending_kind ON scan_jobs(scan_id,state,kind,seq)');
     await database.run("UPDATE scan_jobs SET state='pending' WHERE scan_id=? AND state IN ('processing','failed')", [scanId]);
     let seq = Number((await database.exec('SELECT COALESCE(MAX(seq),0) FROM scan_jobs WHERE scan_id=?', [scanId]))[0]?.values[0][0] || 0);
     return {
       async add(path, kind) {database.enqueue('INSERT OR IGNORE INTO scan_jobs(scan_id,seq,root_id,path,kind,state) VALUES (?,?,?,?,?,?)', [scanId, ++seq, rootId, path, kind, 'pending']);if (database.pending.length >= 32) await database.flush();},
-      async next() {const row = (await database.exec("SELECT seq,path,kind FROM scan_jobs WHERE scan_id=? AND state='pending' ORDER BY seq LIMIT 1", [scanId]))[0]?.values[0];return row ? { seq: row[0], path: row[1], kind: row[2] } : null;},
+      async next(kind = null) {const row = (await database.exec("SELECT seq,path,kind FROM scan_jobs WHERE scan_id=? AND state='pending'" + (kind ? ' AND kind=?' : '') + ' ORDER BY seq' + (kind === 'directory' ? ' DESC' : '') + ' LIMIT 1', kind ? [scanId, kind] : [scanId]))[0]?.values[0];return row ? { seq: row[0], path: row[1], kind: row[2] } : null;},
       async start(seq) {await database.run("UPDATE scan_jobs SET state='processing' WHERE scan_id=? AND seq=?", [scanId, seq]);},
       async finish(seq, state, occurrenceId = null, error = null) {await database.run('UPDATE scan_jobs SET state=?,occurrence_id=?,error=? WHERE scan_id=? AND seq=?', [state, occurrenceId, error, scanId, seq]);},
       async count() {return Number((await database.exec('SELECT COUNT(*) FROM scan_jobs WHERE scan_id=?', [scanId]))[0]?.values[0][0] || 0);}
@@ -4979,6 +4982,8 @@ self.onmessage=async e=>{
 }
 ;
 </script>
+
+
 
 
 
@@ -5991,7 +5996,7 @@ globalThis.MEDIA_SQLITE_WASM="AGFzbQEAAAABiwREYAJ/fwF/YAF/AX9gA39/fwBgA39/fwF/YA
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.1', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.2', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -6019,7 +6024,7 @@ globalThis.MEDIA_SQLITE_WASM="AGFzbQEAAAABiwREYAJ/fwF/YAF/AX9gA39/fwBgA39/fwF/YA
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.2.1', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.2.2', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -6086,11 +6091,12 @@ globalThis.MEDIA_SQLITE_WASM="AGFzbQEAAAABiwREYAJ/fwF/YAF/AX9gA39/fwBgA39/fwF/YA
 
   async function recordStore(database, kind, limit = 256) {return await MediaDatabase.recordStore(database, kind, limit);}
   async function scanJournal(database, scanId, rootId) {
+    await database.run('CREATE INDEX IF NOT EXISTS scan_jobs_pending_kind ON scan_jobs(scan_id,state,kind,seq)');
     await database.run("UPDATE scan_jobs SET state='pending' WHERE scan_id=? AND state IN ('processing','failed')", [scanId]);
     let seq = Number((await database.exec('SELECT COALESCE(MAX(seq),0) FROM scan_jobs WHERE scan_id=?', [scanId]))[0]?.values[0][0] || 0);
     return {
       async add(path, kind) {database.enqueue('INSERT OR IGNORE INTO scan_jobs(scan_id,seq,root_id,path,kind,state) VALUES (?,?,?,?,?,?)', [scanId, ++seq, rootId, path, kind, 'pending']);if (database.pending.length >= 32) await database.flush();},
-      async next() {const row = (await database.exec("SELECT seq,path,kind FROM scan_jobs WHERE scan_id=? AND state='pending' ORDER BY seq LIMIT 1", [scanId]))[0]?.values[0];return row ? { seq: row[0], path: row[1], kind: row[2] } : null;},
+      async next(kind = null) {const row = (await database.exec("SELECT seq,path,kind FROM scan_jobs WHERE scan_id=? AND state='pending'" + (kind ? ' AND kind=?' : '') + ' ORDER BY seq' + (kind === 'directory' ? ' DESC' : '') + ' LIMIT 1', kind ? [scanId, kind] : [scanId]))[0]?.values[0];return row ? { seq: row[0], path: row[1], kind: row[2] } : null;},
       async start(seq) {await database.run("UPDATE scan_jobs SET state='processing' WHERE scan_id=? AND seq=?", [scanId, seq]);},
       async finish(seq, state, occurrenceId = null, error = null) {await database.run('UPDATE scan_jobs SET state=?,occurrence_id=?,error=? WHERE scan_id=? AND seq=?', [state, occurrenceId, error, scanId, seq]);},
       async count() {return Number((await database.exec('SELECT COUNT(*) FROM scan_jobs WHERE scan_id=?', [scanId]))[0]?.values[0][0] || 0);}
@@ -9826,55 +9832,100 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   async function runJournalScan(rootHandle, scan, scanConfig, onEntry, controller) {
     const journal = await C.scanJournal(db, scan.id, scan.rootId),errors = [];
+    const DIRECTORY_BATCH_SIZE = 32,MAX_DIRECTORY_FRAMES = 32,frames = [];
     if (!(await journal.count())) await journal.add('', 'directory');
     await db.run('INSERT OR REPLACE INTO scan_job_meta VALUES (?,?)', [scan.id, JSON.stringify(scan.config)]);
     const resolveDirectory = async (path) => {
       let handle = rootHandle;
-      for (const part of path.split('/').filter(Boolean)) {
-        const next = await boundedScanRead(handle.getDirectoryHandle(part), controller, 'Opening folder');
-        if (handle !== rootHandle) await handle.release?.();handle = next;
-      }
-      return handle;
-    };
-    while (!controller.cancelled) {
-      const job = await journal.next();if (!job) break;
-      await journal.start(job.seq);await setDirty();
       try {
-        if (job.kind === 'directory') {
-          setScanStatus('Listing folder:', job.path || rootHandle.name);
-          const directory = await resolveDirectory(job.path);
-          try {
-            const iterator = directory.entries();
-            try {while (!controller.cancelled) {
-                const next = await boundedScanRead(iterator.next(), controller, 'Reading directory');
-                if (next.done) break;
-                const [name, handle] = next.value;
-                try {
-                  if (controller.cancelled) break;
-                  const path = job.path ? job.path + '/' + name : name;
-                  if (C.shouldSkipPathForScan(path, scanConfig)) continue;
-                  if (handle.kind === 'directory') await journal.add(path, 'directory');else
-                  if (C.shouldProcessName(name, scanConfig.extensions) || scanConfig.scanArchives && C.extensionOf(name) === 'zip') await journal.add(path, 'file');
-                  scan.discovered = (scan.discovered || 0) + 1;
-                  if (scan.discovered % 128 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
-                } finally {await handle.release?.();}
-              }} finally {Promise.resolve(iterator.return?.()).catch(() => {});}
-          } finally {if (directory !== rootHandle) await directory.release?.();}
-          await journal.finish(job.seq, controller.cancelled ? 'pending' : 'complete');
-        } else {
-          const entry = { name: job.path.split('/').at(-1), relativePath: job.path, getFile: async () => await C.resolveRelativeFile(rootHandle, job.path), commitJob: async (occurrenceId) => await journal.finish(job.seq, 'complete', occurrenceId) };
-          const beforeErrors = scan.errors.length;
-          await emitEntryOrArchive(entry, onEntry, scanConfig, controller);
-          if (controller.cancelled) {const completed = (await db.exec('SELECT state FROM scan_jobs WHERE scan_id=? AND seq=?', [scan.id, job.seq]))[0]?.values[0][0] === 'complete';if (!completed) await journal.finish(job.seq, 'pending');break;}
-          const checkpoint = await ws.scanCheckpoints[scan.id]?.[job.path];
-          await journal.finish(job.seq, checkpoint?.state === 'failed' || scan.errors.length > beforeErrors ? 'failed' : checkpoint || scanConfig.scanArchives && entry.name.toLowerCase().endsWith('.zip') ? 'complete' : 'skipped', checkpoint?.occurrenceId || null, checkpoint?.error || null);
-          if (checkpoint?.state === 'failed') errors.push({ path: job.path, message: checkpoint.error });
+        for (const part of path.split('/').filter(Boolean)) {
+          const next = await boundedScanRead(handle.getDirectoryHandle(part), controller, 'Opening folder');
+          if (handle !== rootHandle) await handle.release?.();handle = next;
         }
+        return handle;
       } catch (error) {
-        await journal.finish(job.seq, controller.cancelled ? 'pending' : 'failed', null, String(error.message || error));
-        if (!controller.cancelled) errors.push({ path: job.path, message: String(error.message || error) });
+        if (handle !== rootHandle) await handle.release?.();throw error;
       }
-      await setDirty();
+    };
+    const closeFrame = async (frame) => {
+      // A timed-out directory read may still be pending. Do not wait for return().
+      Promise.resolve(frame.iterator.return?.()).catch(() => {});
+      if (frame.directory !== rootHandle) await frame.directory.release?.();
+    };
+    try {
+      while (!controller.cancelled) {
+        // Finish discovered media before listing another batch of folder entries.
+        const fileJob = await journal.next('file');
+        if (fileJob) {
+          const job = fileJob;
+          await journal.start(job.seq);await setDirty();
+          try {
+            const entry = { name: job.path.split('/').at(-1), relativePath: job.path, getFile: async () => await C.resolveRelativeFile(rootHandle, job.path), commitJob: async (occurrenceId) => await journal.finish(job.seq, 'complete', occurrenceId) };
+            const beforeErrors = scan.errors.length;
+            await emitEntryOrArchive(entry, onEntry, scanConfig, controller);
+            if (controller.cancelled) {const completed = (await db.exec('SELECT state FROM scan_jobs WHERE scan_id=? AND seq=?', [scan.id, job.seq]))[0]?.values[0][0] === 'complete';if (!completed) await journal.finish(job.seq, 'pending');break;}
+            const checkpoint = await ws.scanCheckpoints[scan.id]?.[job.path];
+            await journal.finish(job.seq, checkpoint?.state === 'failed' || scan.errors.length > beforeErrors ? 'failed' : checkpoint || scanConfig.scanArchives && entry.name.toLowerCase().endsWith('.zip') ? 'complete' : 'skipped', checkpoint?.occurrenceId || null, checkpoint?.error || null);
+            if (checkpoint?.state === 'failed') errors.push({ path: job.path, message: checkpoint.error });
+          } catch (error) {
+            await journal.finish(job.seq, controller.cancelled ? 'pending' : 'failed', null, String(error.message || error));
+            if (!controller.cancelled) errors.push({ path: job.path, message: String(error.message || error) });
+          }
+          await setDirty();continue;
+        }
+        // Suspend ancestor iterators while visiting recently discovered children.
+        // Very deep trees spill pending directories to SQLite instead of retaining
+        // an unbounded number of live handles and iterators.
+        if (frames.length < MAX_DIRECTORY_FRAMES) {
+          const job = await journal.next('directory');
+          if (job) {
+            await journal.start(job.seq);
+            let directory;
+            try {
+              directory = await resolveDirectory(job.path);
+              frames.push({ job, directory, iterator: directory.entries() });
+            } catch (error) {
+              if (directory && directory !== rootHandle) await directory.release?.();
+              await journal.finish(job.seq, controller.cancelled ? 'pending' : 'failed', null, String(error.message || error));
+              if (!controller.cancelled) errors.push({ path: job.path, message: String(error.message || error) });
+              await setDirty();continue;
+            }
+          }
+        }
+        if (!frames.length) break;
+        const frame = frames.at(-1),job = frame.job;
+        setScanStatus('Listing folder:', job.path || rootHandle.name);
+        try {
+          for (let listed = 0; listed < DIRECTORY_BATCH_SIZE && !controller.cancelled; listed++) {
+            const next = await boundedScanRead(frame.iterator.next(), controller, 'Reading directory');
+            if (next.done) {
+              await journal.finish(job.seq, 'complete');frames.pop();await closeFrame(frame);break;
+            }
+            const [name, handle] = next.value;
+            try {
+              if (controller.cancelled) break;
+              const path = job.path ? job.path + '/' + name : name;
+              if (C.shouldSkipPathForScan(path, scanConfig)) continue;
+              if (handle.kind === 'directory') await journal.add(path, 'directory');else
+              if (C.shouldProcessName(name, scanConfig.extensions) || scanConfig.scanArchives && C.extensionOf(name) === 'zip') await journal.add(path, 'file');
+              scan.discovered = (scan.discovered || 0) + 1;
+            } finally {await handle.release?.();}
+          }
+          await db.flush();
+        } catch (error) {
+          await journal.finish(job.seq, controller.cancelled ? 'pending' : 'failed', null, String(error.message || error));
+          if (frames.at(-1) === frame) {frames.pop();await closeFrame(frame);}
+          if (!controller.cancelled) errors.push({ path: job.path, message: String(error.message || error) });
+        }
+        await setDirty();
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    } finally {
+      for (const frame of frames.reverse()) {
+        // Resume also resets processing jobs if a storage error prevents cleanup.
+        try {await journal.finish(frame.job.seq, 'pending');} catch (_) {}
+        try {await closeFrame(frame);} catch (_) {}
+      }
     }
     return { errors, cancelled: controller.cancelled };
   }

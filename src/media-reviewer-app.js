@@ -3485,55 +3485,100 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   async function runJournalScan(rootHandle, scan, scanConfig, onEntry, controller) {
     const journal = await C.scanJournal(db, scan.id, scan.rootId),errors = [];
+    const DIRECTORY_BATCH_SIZE = 32,MAX_DIRECTORY_FRAMES = 32,frames = [];
     if (!(await journal.count())) await journal.add('', 'directory');
     await db.run('INSERT OR REPLACE INTO scan_job_meta VALUES (?,?)', [scan.id, JSON.stringify(scan.config)]);
     const resolveDirectory = async (path) => {
       let handle = rootHandle;
-      for (const part of path.split('/').filter(Boolean)) {
-        const next = await boundedScanRead(handle.getDirectoryHandle(part), controller, 'Opening folder');
-        if (handle !== rootHandle) await handle.release?.();handle = next;
-      }
-      return handle;
-    };
-    while (!controller.cancelled) {
-      const job = await journal.next();if (!job) break;
-      await journal.start(job.seq);await setDirty();
       try {
-        if (job.kind === 'directory') {
-          setScanStatus('Listing folder:', job.path || rootHandle.name);
-          const directory = await resolveDirectory(job.path);
-          try {
-            const iterator = directory.entries();
-            try {while (!controller.cancelled) {
-                const next = await boundedScanRead(iterator.next(), controller, 'Reading directory');
-                if (next.done) break;
-                const [name, handle] = next.value;
-                try {
-                  if (controller.cancelled) break;
-                  const path = job.path ? job.path + '/' + name : name;
-                  if (C.shouldSkipPathForScan(path, scanConfig)) continue;
-                  if (handle.kind === 'directory') await journal.add(path, 'directory');else
-                  if (C.shouldProcessName(name, scanConfig.extensions) || scanConfig.scanArchives && C.extensionOf(name) === 'zip') await journal.add(path, 'file');
-                  scan.discovered = (scan.discovered || 0) + 1;
-                  if (scan.discovered % 128 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
-                } finally {await handle.release?.();}
-              }} finally {Promise.resolve(iterator.return?.()).catch(() => {});}
-          } finally {if (directory !== rootHandle) await directory.release?.();}
-          await journal.finish(job.seq, controller.cancelled ? 'pending' : 'complete');
-        } else {
-          const entry = { name: job.path.split('/').at(-1), relativePath: job.path, getFile: async () => await C.resolveRelativeFile(rootHandle, job.path), commitJob: async (occurrenceId) => await journal.finish(job.seq, 'complete', occurrenceId) };
-          const beforeErrors = scan.errors.length;
-          await emitEntryOrArchive(entry, onEntry, scanConfig, controller);
-          if (controller.cancelled) {const completed = (await db.exec('SELECT state FROM scan_jobs WHERE scan_id=? AND seq=?', [scan.id, job.seq]))[0]?.values[0][0] === 'complete';if (!completed) await journal.finish(job.seq, 'pending');break;}
-          const checkpoint = await ws.scanCheckpoints[scan.id]?.[job.path];
-          await journal.finish(job.seq, checkpoint?.state === 'failed' || scan.errors.length > beforeErrors ? 'failed' : checkpoint || scanConfig.scanArchives && entry.name.toLowerCase().endsWith('.zip') ? 'complete' : 'skipped', checkpoint?.occurrenceId || null, checkpoint?.error || null);
-          if (checkpoint?.state === 'failed') errors.push({ path: job.path, message: checkpoint.error });
+        for (const part of path.split('/').filter(Boolean)) {
+          const next = await boundedScanRead(handle.getDirectoryHandle(part), controller, 'Opening folder');
+          if (handle !== rootHandle) await handle.release?.();handle = next;
         }
+        return handle;
       } catch (error) {
-        await journal.finish(job.seq, controller.cancelled ? 'pending' : 'failed', null, String(error.message || error));
-        if (!controller.cancelled) errors.push({ path: job.path, message: String(error.message || error) });
+        if (handle !== rootHandle) await handle.release?.();throw error;
       }
-      await setDirty();
+    };
+    const closeFrame = async (frame) => {
+      // A timed-out directory read may still be pending. Do not wait for return().
+      Promise.resolve(frame.iterator.return?.()).catch(() => {});
+      if (frame.directory !== rootHandle) await frame.directory.release?.();
+    };
+    try {
+      while (!controller.cancelled) {
+        // Finish discovered media before listing another batch of folder entries.
+        const fileJob = await journal.next('file');
+        if (fileJob) {
+          const job = fileJob;
+          await journal.start(job.seq);await setDirty();
+          try {
+            const entry = { name: job.path.split('/').at(-1), relativePath: job.path, getFile: async () => await C.resolveRelativeFile(rootHandle, job.path), commitJob: async (occurrenceId) => await journal.finish(job.seq, 'complete', occurrenceId) };
+            const beforeErrors = scan.errors.length;
+            await emitEntryOrArchive(entry, onEntry, scanConfig, controller);
+            if (controller.cancelled) {const completed = (await db.exec('SELECT state FROM scan_jobs WHERE scan_id=? AND seq=?', [scan.id, job.seq]))[0]?.values[0][0] === 'complete';if (!completed) await journal.finish(job.seq, 'pending');break;}
+            const checkpoint = await ws.scanCheckpoints[scan.id]?.[job.path];
+            await journal.finish(job.seq, checkpoint?.state === 'failed' || scan.errors.length > beforeErrors ? 'failed' : checkpoint || scanConfig.scanArchives && entry.name.toLowerCase().endsWith('.zip') ? 'complete' : 'skipped', checkpoint?.occurrenceId || null, checkpoint?.error || null);
+            if (checkpoint?.state === 'failed') errors.push({ path: job.path, message: checkpoint.error });
+          } catch (error) {
+            await journal.finish(job.seq, controller.cancelled ? 'pending' : 'failed', null, String(error.message || error));
+            if (!controller.cancelled) errors.push({ path: job.path, message: String(error.message || error) });
+          }
+          await setDirty();continue;
+        }
+        // Suspend ancestor iterators while visiting recently discovered children.
+        // Very deep trees spill pending directories to SQLite instead of retaining
+        // an unbounded number of live handles and iterators.
+        if (frames.length < MAX_DIRECTORY_FRAMES) {
+          const job = await journal.next('directory');
+          if (job) {
+            await journal.start(job.seq);
+            let directory;
+            try {
+              directory = await resolveDirectory(job.path);
+              frames.push({ job, directory, iterator: directory.entries() });
+            } catch (error) {
+              if (directory && directory !== rootHandle) await directory.release?.();
+              await journal.finish(job.seq, controller.cancelled ? 'pending' : 'failed', null, String(error.message || error));
+              if (!controller.cancelled) errors.push({ path: job.path, message: String(error.message || error) });
+              await setDirty();continue;
+            }
+          }
+        }
+        if (!frames.length) break;
+        const frame = frames.at(-1),job = frame.job;
+        setScanStatus('Listing folder:', job.path || rootHandle.name);
+        try {
+          for (let listed = 0; listed < DIRECTORY_BATCH_SIZE && !controller.cancelled; listed++) {
+            const next = await boundedScanRead(frame.iterator.next(), controller, 'Reading directory');
+            if (next.done) {
+              await journal.finish(job.seq, 'complete');frames.pop();await closeFrame(frame);break;
+            }
+            const [name, handle] = next.value;
+            try {
+              if (controller.cancelled) break;
+              const path = job.path ? job.path + '/' + name : name;
+              if (C.shouldSkipPathForScan(path, scanConfig)) continue;
+              if (handle.kind === 'directory') await journal.add(path, 'directory');else
+              if (C.shouldProcessName(name, scanConfig.extensions) || scanConfig.scanArchives && C.extensionOf(name) === 'zip') await journal.add(path, 'file');
+              scan.discovered = (scan.discovered || 0) + 1;
+            } finally {await handle.release?.();}
+          }
+          await db.flush();
+        } catch (error) {
+          await journal.finish(job.seq, controller.cancelled ? 'pending' : 'failed', null, String(error.message || error));
+          if (frames.at(-1) === frame) {frames.pop();await closeFrame(frame);}
+          if (!controller.cancelled) errors.push({ path: job.path, message: String(error.message || error) });
+        }
+        await setDirty();
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    } finally {
+      for (const frame of frames.reverse()) {
+        // Resume also resets processing jobs if a storage error prevents cleanup.
+        try {await journal.finish(frame.job.seq, 'pending');} catch (_) {}
+        try {await closeFrame(frame);} catch (_) {}
+      }
     }
     return { errors, cancelled: controller.cancelled };
   }
