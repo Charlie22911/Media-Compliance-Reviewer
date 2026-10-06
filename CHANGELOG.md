@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.2.3 — October 6, 2026
+
+- Discover folders while processing media, so folder reads can overlap fingerprinting and preview creation.
+- Pause discovery when enough media is queued, and save discovered paths between media transactions so a failed item does not discard pending work.
+- Handle cancellation between media jobs without starting another hash on the stopped worker.
+
 ## 3.2.2 — October 6, 2026
 
 - Process discovered media between small batches of folder discovery so thumbnails and review results can appear before the whole folder tree is listed.

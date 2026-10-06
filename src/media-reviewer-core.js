@@ -893,7 +893,7 @@
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.2', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.3', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -994,6 +994,7 @@
     return {
       async add(path, kind) {database.enqueue('INSERT OR IGNORE INTO scan_jobs(scan_id,seq,root_id,path,kind,state) VALUES (?,?,?,?,?,?)', [scanId, ++seq, rootId, path, kind, 'pending']);if (database.pending.length >= 32) await database.flush();},
       async next(kind = null) {const row = (await database.exec("SELECT seq,path,kind FROM scan_jobs WHERE scan_id=? AND state='pending'" + (kind ? ' AND kind=?' : '') + ' ORDER BY seq' + (kind === 'directory' ? ' DESC' : '') + ' LIMIT 1', kind ? [scanId, kind] : [scanId]))[0]?.values[0];return row ? { seq: row[0], path: row[1], kind: row[2] } : null;},
+      async pendingCount(kind, limit) {return Number((await database.exec("SELECT COUNT(*) FROM (SELECT seq FROM scan_jobs WHERE scan_id=? AND state='pending' AND kind=? LIMIT ?)", [scanId, kind, limit]))[0]?.values[0][0] || 0);},
       async start(seq) {await database.run("UPDATE scan_jobs SET state='processing' WHERE scan_id=? AND seq=?", [scanId, seq]);},
       async finish(seq, state, occurrenceId = null, error = null) {await database.run('UPDATE scan_jobs SET state=?,occurrence_id=?,error=? WHERE scan_id=? AND seq=?', [state, occurrenceId, error, scanId, seq]);},
       async count() {return Number((await database.exec('SELECT COUNT(*) FROM scan_jobs WHERE scan_id=?', [scanId]))[0]?.values[0][0] || 0);}

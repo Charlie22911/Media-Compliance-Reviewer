@@ -24,7 +24,7 @@ Use the app's **Help** button for detailed instructions and **About** for the ve
 
 ## Scan settings and results
 
-- Folder discovery and media processing alternate in small batches, so thumbnails and review results can appear before the whole folder tree is listed. Counts grow as discovery continues. Resume skips completed file jobs and completed folders; an interrupted folder may be listed again.
+- Folder discovery continues while matching files are fingerprinted and their previews are created. Discovery pauses when enough files are waiting to be processed, keeping the amount of queued work limited. Counts grow as discovery continues. Resume skips completed file jobs and completed folders; an interrupted folder may be listed again.
 - **Quick** selects common image and video formats. **Deep** selects all listed formats, including camera RAW. **Custom** uses your selection. Only selected file types are scanned.
 - Scan exclusions can skip Application Data inside user folders and files last modified more than a chosen number of years ago. Zero years includes all ages. ZIP scanning is optional.
 - Large files can use sampled quick fingerprints. A quick fingerprint is a candidate match, not a full-file verification. Evidence capture verifies a full SHA-256 before preserving an original.
@@ -58,6 +58,8 @@ npm install
 npm run build
 npm run check
 ```
+
+The optional scanner regression check uses Node.js 24 or later: run `npm run test:scan`.
 
 The build uses the vendored runtimes and embedded HTML templates. The app does not download code or decoder assets at runtime. External license links in About open websites only when clicked.
 

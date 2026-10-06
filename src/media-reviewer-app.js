@@ -3256,6 +3256,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     return worker;
   }
   function hashFile(controller, file, jobId, onProgress, request = {}) {
+    if (controller.cancelled) return Promise.reject(new DOMException('Scan cancelled', 'AbortError'));
     const generation = databaseGeneration,worker = controller.worker;
     return new Promise(async (resolve, reject) => {
       let settled = false,timer;
@@ -3485,14 +3486,16 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   async function runJournalScan(rootHandle, scan, scanConfig, onEntry, controller) {
     const journal = await C.scanJournal(db, scan.id, scan.rootId),errors = [];
-    const DIRECTORY_BATCH_SIZE = 32,MAX_DIRECTORY_FRAMES = 32,frames = [];
+    const DIRECTORY_BATCH_SIZE = 32,MAX_DIRECTORY_FRAMES = 32,MAX_PENDING_FILES = 128,frames = [];
+    let discovery = null,closing = false;
+    const discoveryController = { get cancelled() {return controller.cancelled || closing;} };
     if (!(await journal.count())) await journal.add('', 'directory');
     await db.run('INSERT OR REPLACE INTO scan_job_meta VALUES (?,?)', [scan.id, JSON.stringify(scan.config)]);
     const resolveDirectory = async (path) => {
       let handle = rootHandle;
       try {
         for (const part of path.split('/').filter(Boolean)) {
-          const next = await boundedScanRead(handle.getDirectoryHandle(part), controller, 'Opening folder');
+          const next = await boundedScanRead(handle.getDirectoryHandle(part), discoveryController, 'Opening folder');
           if (handle !== rootHandle) await handle.release?.();handle = next;
         }
         return handle;
@@ -3505,10 +3508,75 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       Promise.resolve(frame.iterator.return?.()).catch(() => {});
       if (frame.directory !== rootHandle) await frame.directory.release?.();
     };
+    const readBatch = async (frame, limit) => {
+      const result = { jobs: [], discovered: 0, done: false, error: null };
+      try {
+        for (let listed = 0; listed < limit && !discoveryController.cancelled; listed++) {
+          const next = await boundedScanRead(frame.iterator.next(), discoveryController, 'Reading directory');
+          if (next.done) {result.done = true;break;}
+          const [name, handle] = next.value;
+          try {
+            if (discoveryController.cancelled) break;
+            const path = frame.job.path ? frame.job.path + '/' + name : name;
+            if (C.shouldSkipPathForScan(path, scanConfig)) continue;
+            if (handle.kind === 'directory') result.jobs.push({ path, kind: 'directory' });else
+            if (C.shouldProcessName(name, scanConfig.extensions) || scanConfig.scanArchives && C.extensionOf(name) === 'zip') result.jobs.push({ path, kind: 'file' });
+            result.discovered++;
+          } finally {await handle.release?.();}
+        }
+      } catch (error) {result.error = error;}
+      return result;
+    };
+    const publishBatch = async () => {
+      const batch = discovery,result = await batch.promise,frame = batch.frame,job = batch.job;
+      discovery = null;
+      // Persist directory batches only between onEntry calls, keeping discovery
+      // outside the transaction that publishes a completed media item.
+      for (const job of result.jobs) await journal.add(job.path, job.kind);
+      await db.flush();
+      scan.discovered = (scan.discovered || 0) + result.discovered;
+      if (result.done || result.error) {
+        await journal.finish(job.seq, result.error ? controller.cancelled ? 'pending' : 'failed' : 'complete', null, result.error ? String(result.error.message || result.error) : null);
+        if (frame) {frames.pop();await closeFrame(frame);}
+        if (result.error && !controller.cancelled) errors.push({ path: job.path, message: String(result.error.message || result.error) });
+      }
+      await setDirty();
+    };
     try {
       while (!controller.cancelled) {
-        // Finish discovered media before listing another batch of folder entries.
+        if (discovery?.settled) await publishBatch();
         const fileJob = await journal.next('file');
+        if (!discovery) {
+          const room = MAX_PENDING_FILES - await journal.pendingCount('file', MAX_PENDING_FILES);
+          // Wait for a full batch of capacity instead of resuming discovery for
+          // one entry after each photo when the backlog is near its limit.
+          if (room >= DIRECTORY_BATCH_SIZE || !fileJob) {
+            // Suspend ancestor iterators while visiting recently found children.
+            // Deeper pending directories remain on disk until a frame is free.
+            const nextDirectory = frames.length < MAX_DIRECTORY_FRAMES ? await journal.next('directory') : null;
+            if (nextDirectory) await journal.start(nextDirectory.seq);
+            if (nextDirectory || frames.length) {
+              const job = nextDirectory || frames.at(-1).job;
+              if (!fileJob) setScanStatus('Listing folder:', job.path || rootHandle.name);
+              const batch = discovery = { job, frame: nextDirectory ? null : frames.at(-1), settled: false };
+              batch.promise = (async () => {
+                if (nextDirectory) {
+                  let directory;
+                  try {
+                    directory = await resolveDirectory(job.path);
+                    batch.frame = { job, directory, iterator: directory.entries() };
+                    frames.push(batch.frame);
+                  } catch (error) {
+                    if (directory && directory !== rootHandle) await directory.release?.();
+                    return { jobs: [], discovered: 0, done: false, error };
+                  }
+                }
+                return await readBatch(batch.frame, Math.min(DIRECTORY_BATCH_SIZE, room));
+              })().then(result => {batch.settled = true;return result;});
+            }
+          }
+        }
+        if (controller.cancelled) break;
         if (fileJob) {
           const job = fileJob;
           await journal.start(job.seq);await setDirty();
@@ -3526,54 +3594,18 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           }
           await setDirty();continue;
         }
-        // Suspend ancestor iterators while visiting recently discovered children.
-        // Very deep trees spill pending directories to SQLite instead of retaining
-        // an unbounded number of live handles and iterators.
-        if (frames.length < MAX_DIRECTORY_FRAMES) {
-          const job = await journal.next('directory');
-          if (job) {
-            await journal.start(job.seq);
-            let directory;
-            try {
-              directory = await resolveDirectory(job.path);
-              frames.push({ job, directory, iterator: directory.entries() });
-            } catch (error) {
-              if (directory && directory !== rootHandle) await directory.release?.();
-              await journal.finish(job.seq, controller.cancelled ? 'pending' : 'failed', null, String(error.message || error));
-              if (!controller.cancelled) errors.push({ path: job.path, message: String(error.message || error) });
-              await setDirty();continue;
-            }
-          }
-        }
-        if (!frames.length) break;
-        const frame = frames.at(-1),job = frame.job;
-        setScanStatus('Listing folder:', job.path || rootHandle.name);
-        try {
-          for (let listed = 0; listed < DIRECTORY_BATCH_SIZE && !controller.cancelled; listed++) {
-            const next = await boundedScanRead(frame.iterator.next(), controller, 'Reading directory');
-            if (next.done) {
-              await journal.finish(job.seq, 'complete');frames.pop();await closeFrame(frame);break;
-            }
-            const [name, handle] = next.value;
-            try {
-              if (controller.cancelled) break;
-              const path = job.path ? job.path + '/' + name : name;
-              if (C.shouldSkipPathForScan(path, scanConfig)) continue;
-              if (handle.kind === 'directory') await journal.add(path, 'directory');else
-              if (C.shouldProcessName(name, scanConfig.extensions) || scanConfig.scanArchives && C.extensionOf(name) === 'zip') await journal.add(path, 'file');
-              scan.discovered = (scan.discovered || 0) + 1;
-            } finally {await handle.release?.();}
-          }
-          await db.flush();
-        } catch (error) {
-          await journal.finish(job.seq, controller.cancelled ? 'pending' : 'failed', null, String(error.message || error));
-          if (frames.at(-1) === frame) {frames.pop();await closeFrame(frame);}
-          if (!controller.cancelled) errors.push({ path: job.path, message: String(error.message || error) });
-        }
-        await setDirty();
+        if (!discovery) break;
+        await publishBatch();
         await new Promise(resolve => setTimeout(resolve, 0));
       }
     } finally {
+      // Drain any pending read before closing its iterator and releasing handles.
+      // Unpublished paths are rediscovered from this pending folder on resume.
+      closing = true;
+      if (discovery) await discovery.promise;
+      if (discovery && !discovery.frame) {
+        try {await journal.finish(discovery.job.seq, 'pending');} catch (_) {}
+      }
       for (const frame of frames.reverse()) {
         // Resume also resets processing jobs if a storage error prevents cleanup.
         try {await journal.finish(frame.job.seq, 'pending');} catch (_) {}
