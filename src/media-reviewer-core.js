@@ -893,7 +893,7 @@
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.3', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.4', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -921,7 +921,7 @@
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.2.2', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.2.4', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -1102,6 +1102,7 @@
         input.contents = {};input.occurrences = {};input.decisions = {};input.catalogNormalized = true;
       }
       await database.run("CREATE INDEX IF NOT EXISTS catalog_root_path ON catalog_records(kind,root_id,path); CREATE INDEX IF NOT EXISTS catalog_hash ON catalog_records(kind,hash);");
+      await database.run('CREATE INDEX IF NOT EXISTS catalog_found_order ON catalog_records(kind,status);');
       // Find the first path within a hash group without scanning the whole root for each result.
       await database.run("CREATE INDEX IF NOT EXISTS catalog_occurrence_group_path ON catalog_records(root_id,hash,path) WHERE kind='occurrences';");
       await database.run('CREATE INDEX IF NOT EXISTS preview_access_lru ON preview_access(used_at,hash);');

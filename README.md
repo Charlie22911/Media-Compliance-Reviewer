@@ -25,10 +25,11 @@ Use the app's **Help** button for detailed instructions and **About** for the ve
 ## Scan settings and results
 
 - Folder discovery continues while matching files are fingerprinted and their previews are created. Discovery pauses when enough files are waiting to be processed, keeping the amount of queued work limited. Counts grow as discovery continues. Resume skips completed file jobs and completed folders; an interrupted folder may be listed again.
+- Items appear in Found order by default. Resuming a scan keeps the saved sequence and appends newly found items at the end. Scan updates keep displayed items in place and update their location counts. When you mark items, the remaining cards move into the gaps and only the replacements needed to fill the page are loaded. Choose a sort order or filters when needed. Reset view clears those choices and restores Found order with all file types shown. Older databases retain their existing stored order in this view.
 - **Quick** selects common image and video formats. **Deep** selects all listed formats, including camera RAW. **Custom** uses your selection. Only selected file types are scanned.
 - Scan exclusions can skip Application Data inside user folders and files last modified more than a chosen number of years ago. Zero years includes all ages. ZIP scanning is optional.
 - Large files can use sampled quick fingerprints. A quick fingerprint is a candidate match, not a full-file verification. Evidence capture verifies a full SHA-256 before preserving an original.
-- Results start in **Scan date · oldest first** order. Search, scanned-folder and file-type controls narrow the displayed results without changing scan settings.
+- Results start in **Found order · first found first**. Search, scanned-folder and file-type controls narrow the displayed results without changing scan settings.
 - Choose 20, 40, 60, 100, or 200 **Items per page**, or enter a page number and press **Go** or Enter. Changing pages or sort order clears the current selection.
 
 ## Saved previews and originals
@@ -59,7 +60,7 @@ npm run build
 npm run check
 ```
 
-The optional scanner regression check uses Node.js 24 or later: run `npm run test:scan`.
+The optional scanner and live-results regression checks use Node.js 24 or later: run `npm run test:scan` and `npm run test:results`.
 
 The build uses the vendored runtimes and embedded HTML templates. The app does not download code or decoder assets at runtime. External license links in About open websites only when clicked.
 

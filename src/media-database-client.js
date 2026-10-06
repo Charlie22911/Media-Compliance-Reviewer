@@ -50,7 +50,8 @@
  async function recordStore(database,kind,limit=256){
   const cache=new Map();let count=Number((await database.exec('SELECT COUNT(*) FROM catalog_records WHERE kind=?',[kind]))[0]?.values[0][0]||0);
   const remember=(id,value)=>{cache.delete(id);cache.set(id,value);while(cache.size>limit)cache.delete(cache.keys().next().value);return value;};
-  const write=(id,row)=>database.enqueue('INSERT OR REPLACE INTO catalog_records VALUES (?,?,?,?,?,?,?,?,?,?)',[kind,id,row.rootId||'',row.hash||'',row.status||'',row.name||'',row.path||'',row.extension||'',row.reviewedAt||row.lastSeen||'',JSON.stringify(row)]);
+  // Updates must retain rowids: the default results view follows insertion order.
+  const write=(id,row)=>database.enqueue('INSERT INTO catalog_records VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(kind,id) DO UPDATE SET root_id=excluded.root_id,hash=excluded.hash,status=excluded.status,name=excluded.name,path=excluded.path,extension=excluded.extension,sort_time=excluded.sort_time,row_json=excluded.row_json',[kind,id,row.rootId||'',row.hash||'',row.status||'',row.name||'',row.path||'',row.extension||'',row.reviewedAt||row.lastSeen||'',JSON.stringify(row)]);
   const wrap=(id,row)=>remember(id,new Proxy(row,{set(target,key,value){target[key]=value;write(id,target);return true;},deleteProperty(target,key){delete target[key];write(id,target);return true;}}));
   async function read(id){if(cache.has(id))return remember(id,cache.get(id));const row=(await database.exec('SELECT row_json FROM catalog_records WHERE kind=? AND id=?',[kind,id]))[0]?.values[0];return row?wrap(id,JSON.parse(row[0])):undefined;}
   const values=async()=>((await database.exec('SELECT id,row_json FROM catalog_records WHERE kind=?',[kind]))[0]?.values||[]).map(([id,json])=>wrap(id,JSON.parse(json)));

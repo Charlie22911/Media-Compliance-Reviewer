@@ -2011,7 +2011,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       pendingEvidenceKeys = [];
       selected.clear();
       if (completed) await setDirty();
-      await renderAll();
+      await renderAll(true);
       toast(`${operation.cancelled ? 'Evidence capture cancelled' : 'Evidence capture'}: ${completed} completed${failed.length ? `,
       ${
       failed.length}
@@ -2100,7 +2100,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       }
       selected.clear();
       await setDirty();
-      await renderAll();
+      await renderAll(true);
       if ($('#inspect-dialog').open) await $('#inspect-dialog').close();
       toast('Evidence reassigned and encrypted copy deleted.');
     } finally
@@ -2725,7 +2725,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   async function cards() {
     return (await MediaDatabase.arrayMap((await db.exec("SELECT id FROM catalog_records WHERE kind='decisions'"))[0]?.values || [], async (row) => await cardForKey(row[0]))).filter(Boolean);
   }
-  function buildCardQuery(bucket, filtered = true, limit = null, offset = 0, countOnly = false) {
+  function buildCardQuery(bucket, filtered = true, limit = null, offset = 0, countOnly = false, candidates = null, excluded = []) {
     const params = [bucket],where = ["d.kind='decisions'", "d.status=?"];
     if (filtered) {
       const exts = [...ws.preferences.visibleExtensions];
@@ -2744,8 +2744,13 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       if ($('#preview-filter').checked) {matching += ' AND NOT EXISTS (SELECT 1 FROM thumbnails t WHERE t.hash=o.hash)';}
       where.push("(d.status='EVIDENCE' OR EXISTS(SELECT 1 FROM catalog_records o WHERE " + matching + '))');
     }
+    if (candidates) {
+      if (!candidates.length) return { empty: true, countOnly };
+      where.push('d.id IN (' + candidates.map(() => '?').join(',') + ')');params.push(...candidates);
+    }
+    if (excluded.length) {where.push('d.id NOT IN (' + excluded.map(() => '?').join(',') + ')');params.push(...excluded);}
     const sort = $('#sort').value,ascending = sort.endsWith('asc'),direction = ascending ? 'ASC' : 'DESC';
-    let order = 'd.sort_time DESC';
+    let order = sort === 'found-asc' ? 'd.rowid ASC' : 'd.sort_time DESC';
     const occurrenceField = sort === 'name' ? 'o.name' : sort === 'path' ? 'o.path' : sort.startsWith('modified') ? "CAST(json_extract(o.row_json,'$.lastModified') AS REAL)" : sort.startsWith('size') ? "CAST(json_extract(o.row_json,'$.size') AS REAL)" : sort.startsWith('scan') ? "json_extract(o.row_json,'$.lastSeen')" : null;
     if (occurrenceField) order = "(SELECT " + occurrenceField + " FROM catalog_records o WHERE o.kind='occurrences' AND o.root_id=d.root_id AND o.hash=d.hash AND COALESCE(json_extract(o.row_json,'$.supersededAt'),'')='' ORDER BY o.path LIMIT 1) " + (sort === 'name' || sort === 'path' ? 'ASC' : direction);
     let sql = 'SELECT ' + (countOnly ? 'COUNT(*)' : 'd.id') + ' FROM catalog_records d WHERE ' + where.join(' AND ');
@@ -2832,18 +2837,40 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       const checkbox = node.querySelector('.card-check');if (checkbox) checkbox.checked = active;
     });renderSelection();
   }
-  let gridQueryBusy = false,gridQueryAgain = false,gridQueryDefer = false,previewRefreshVersion = 0;
+  let gridQueryBusy = false,gridQueryAgain = false,gridQueryDefer = false,gridQueryPreserve = false,gridQueryPromise = null,deferredGridPreserve = false,previewRefreshVersion = 0,renderedGridSignature = null;
+  function retainLiveCardKeys(current, matching, incoming, limit) {
+    const allowed = new Set(matching),seen = new Set(),keys = [];
+    for (const key of [...current.filter(key => allowed.has(key)), ...incoming]) {
+      if (seen.has(key)) continue;
+      if (keys.length >= limit) break;
+      seen.add(key);keys.push(key);
+    }
+    return keys;
+  }
+  function updateCardDetails(node, card, occurrence) {
+    node.__occurrenceId = occurrence.id;
+    node.querySelector('.filename').textContent = occurrence.name;
+    const path = node.querySelector('.path');
+    if (path.dataset.fullPath !== occurrence.path) observeFittedPath(path, occurrence.path);
+    const user = C.homeShareUser(occurrence.path, ws.roots[occurrence.rootId]?.kind),userLine = node.querySelector('.card-user');
+    userLine.textContent = user ? 'User: ' + user : '';userLine.classList.toggle('hidden', !user);
+    node.querySelector('.card-check').setAttribute('aria-label', 'Select ' + occurrence.name);
+    const image = node.querySelector('img');if (image) image.alt = 'Preview of ' + occurrence.name;
+    node.querySelector('.badge').textContent = (C.mediaKindForExtension(occurrence.extension) === 'video' ? '▶ ' : '') + occurrence.extension.toUpperCase();
+    node.querySelector('.card-locations').textContent = `${card.occurrences.length} location${card.occurrences.length === 1 ? '' : 's'}` + (contentHashMethod(card.content, card.decision.hash) === 'sampled-sha256-v1' ? ' · Quick fingerprint' : '');
+  }
   function gridQuerySignature() {return JSON.stringify([databaseGeneration, activeBucket, page, pageSize, $('#root-filter').value, $('#search').value, $('#source-filter').checked, $('#preview-filter').checked, $('#sort').value, [...ws.preferences.visibleExtensions]]);}
-  async function renderResults(deferInteraction = false) {
+  async function renderResults(deferInteraction = false, preservePage = deferInteraction && Boolean(scanController)) {
     if (!databaseClient) return;
-    if (evidenceOperationInFlight) {scheduleLiveResults();return;}
-    if (gridQueryBusy) {gridQueryDefer = gridQueryAgain ? gridQueryDefer && deferInteraction : deferInteraction;gridQueryAgain = true;return;}
+    if (evidenceOperationInFlight) {deferredGridPreserve ||= preservePage;scheduleLiveResults();return;}
+    if (gridQueryBusy) {gridQueryDefer = gridQueryAgain ? gridQueryDefer && deferInteraction : deferInteraction;gridQueryPreserve = gridQueryAgain ? gridQueryPreserve && preservePage : preservePage;gridQueryAgain = true;return gridQueryPromise;}
     gridQueryBusy = true;
     $('#results').setAttribute('aria-busy', 'true');
-    if (!deferInteraction) showOperation('Results', 'Loading the selected page and order…');
-    renderResultsAsync(deferInteraction).catch((error) => {if (!/Database changed/.test(error.message)) toast('Could not load results: ' + error.message, true);}).finally(async () => {gridQueryBusy = false;$('#results').setAttribute('aria-busy', 'false');finishOperation('Results');if (gridQueryAgain) {const defer = gridQueryDefer;gridQueryAgain = false;gridQueryDefer = false;await renderResults(defer);}});
+    if (!deferInteraction) {if (preservePage) $('#result-summary').textContent = 'Updating this page…';else showOperation('Results', 'Loading the selected page and order…');}
+    gridQueryPromise = renderResultsAsync(deferInteraction, preservePage).catch((error) => {if (!/Database changed/.test(error.message)) toast('Could not load results: ' + error.message, true);}).finally(async () => {gridQueryBusy = false;gridQueryPromise = null;$('#results').setAttribute('aria-busy', 'false');$('#results').style.minHeight = '';finishOperation('Results');if (gridQueryAgain) {const defer = gridQueryDefer,preserve = gridQueryPreserve;gridQueryAgain = false;gridQueryDefer = false;gridQueryPreserve = false;await renderResults(defer, preserve);}});
+    return gridQueryPromise;
   }
-  async function renderResultsAsync(deferInteraction = false) {
+  async function renderResultsAsync(deferInteraction = false, preservePage = false) {
     const signature = gridQuerySignature(),counts = await readCounts();
     if (signature !== gridQuerySignature()) {gridQueryAgain = true;return;}
     if (activeBucket === 'EVIDENCE' && !vaultKey) {
@@ -2853,28 +2880,52 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     const inspectedKey = $('#inspect-dialog').open && inspectIndex >= 0 ? visibleCards[inspectIndex]?.key : null;
     const requestedTotal = await queryCardKeysAsync(activeBucket, true, null, 0, true);
     const totalPages = Math.max(1, Math.ceil(requestedTotal / pageSize)),requestedPage = Math.min(page, totalPages);
-    const keys = await queryCardKeysAsync(activeBucket, true, pageSize, (requestedPage - 1) * pageSize);
+    const keepCurrentPage = preservePage && signature === renderedGridSignature && requestedPage === page;
+    let keys;
+    if (keepCurrentPage) {
+      const current = visibleCards.map(card => card.key),matching = await queryCardKeysAsync(activeBucket, true, null, 0, false, current);
+      const retained = retainLiveCardKeys(current, matching, [], pageSize),needed = pageSize - retained.length;
+      const incoming = needed ? await queryCardKeysAsync(activeBucket, true, needed, (requestedPage - 1) * pageSize, false, null, retained) : [];
+      keys = retainLiveCardKeys(retained, retained, incoming, pageSize);
+    } else keys = await queryCardKeysAsync(activeBucket, true, pageSize, (requestedPage - 1) * pageSize);
     if (signature !== gridQuerySignature()) {gridQueryAgain = true;return;}
     if (evidenceOperationInFlight) {scheduleLiveResults();return;}
     if (deferInteraction && (gridPointerActive || Date.now() < interactionUntil || $('#inspect-dialog').open)) {scheduleLiveResults();return;}
-    pageTotal = requestedTotal;page = requestedPage;
-    for (const { status, total, shown } of counts) {$('#count-' + status).textContent = total;$('#visible-' + status).textContent = status === 'EVIDENCE' && !vaultKey ? 'Locked' : 'Showing ' + shown + ' of ' + total;}
-    const slice = (await MediaDatabase.arrayMap(keys, cardForKey)).filter(Boolean);
+    const reuseCards = keepCurrentPage && !deferInteraction,cached = new Map(visibleCards.map(card => [card.key, card]));
+    const slice = (await MediaDatabase.arrayMap(keys, async key => reuseCards && cached.get(key) || await cardForKey(key))).filter(Boolean);
     if (signature !== gridQuerySignature()) {gridQueryAgain = true;return;}
-    visibleCards = slice;
-    if (inspectedKey) inspectIndex = visibleCards.findIndex((card) => card.key === inspectedKey);
-    const grid = $('#results');grid.style.setProperty('--thumbnail-fit', ws.preferences.thumbnailFit === 'fill' ? 'cover' : 'contain');
+    const grid = $('#results');
     const nodes = new Map([...grid.querySelectorAll('.card')].map((node) => [node.dataset.key, node]));
+    const prepared = [];
+    try {
+      for (const card of slice) {
+        let node = nodes.get(card.key);
+        const o = keepCurrentPage && card.occurrences.find(item => item.id === node?.__occurrenceId) || matchingFor(card)[0] || card.occurrences[0];
+        const previewSignature = reuseCards && cached.has(card.key) && node ? node.dataset.signature : [o.hash, await hasThumbnail(o.hash), card.decision.status, Boolean(vaultKey), previewRefreshVersion].join('|');
+        if (!node || node.dataset.signature !== previewSignature) {
+          node = await makeCard(card);node.dataset.signature = previewSignature;
+        }
+        prepared.push({ node, card, occurrence: o });
+      }
+    } catch (error) {for (const { node } of prepared) if (!node.isConnected) disposeCard(node);throw error;}
+    if (signature !== gridQuerySignature() || evidenceOperationInFlight || deferInteraction && (gridPointerActive || Date.now() < interactionUntil || $('#inspect-dialog').open)) {
+      for (const { node } of prepared) if (!node.isConnected) disposeCard(node);
+      if (signature !== gridQuerySignature()) gridQueryAgain = true;else scheduleLiveResults();
+      return;
+    }
+    // Complete database reads before touching the grid. Location updates reuse
+    // the existing card and thumbnail; preview replacements mount in one pass.
+    pageTotal = requestedTotal;page = requestedPage;visibleCards = slice;renderedGridSignature = gridQuerySignature();
+    if (inspectedKey) inspectIndex = visibleCards.findIndex((card) => card.key === inspectedKey);
+    for (const { status, total, shown } of counts) {$('#count-' + status).textContent = total;$('#visible-' + status).textContent = status === 'EVIDENCE' && !vaultKey ? 'Locked' : 'Showing ' + shown + ' of ' + total;}
+    grid.style.setProperty('--thumbnail-fit', ws.preferences.thumbnailFit === 'fill' ? 'cover' : 'contain');
     grid.querySelectorAll('.empty,.evidence-locked').forEach((node) => node.remove());
     const wanted = new Set(slice.map((card) => card.key));
     for (const [key, node] of nodes) if (!wanted.has(key)) disposeCard(node);
-    for (let index = 0; index < slice.length; index++) {
-      const card = slice[index],o = matchingFor(card)[0] || card.occurrences[0];
-      const cardSignature = [o.hash, o.name, o.path, card.occurrences.length, await hasThumbnail(o.hash), card.decision.status, Boolean(vaultKey), previewRefreshVersion].join('|');
-      let node = nodes.get(card.key);
-      if (node && node.dataset.signature !== cardSignature) {disposeCard(node);node = null;}
-      if (!node) {node = await makeCard(card);node.dataset.signature = cardSignature;}
-      if (signature !== gridQuerySignature()) {if (!node.isConnected) disposeCard(node);gridQueryAgain = true;return;}
+    for (let index = 0; index < prepared.length; index++) {
+      const { node, card, occurrence } = prepared[index],old = nodes.get(card.key);
+      updateCardDetails(node, card, occurrence);
+      if (old && old !== node) disposeCard(old);
       if (grid.children[index] !== node) grid.insertBefore(node, grid.children[index] || null);
     }
     if (!slice.length) {const empty = document.createElement('div');empty.className = 'empty';empty.textContent = 'No media matches the active bucket and filters.';grid.append(empty);}
@@ -3039,7 +3090,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     const foot = document.createElement('div');
     foot.className = 'card-foot';
     const count = document.createElement('span');
-    count.className = 'tiny muted grow';
+    count.className = 'tiny muted grow card-locations';
     count.textContent = `${card.occurrences.length} location${card.occurrences.length === 1 ? '' : 's'}` + (
     contentHashMethod(card.content, card.decision.hash) === 'sampled-sha256-v1' ?
     ' · Quick fingerprint' : '');
@@ -3192,7 +3243,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   function escapeAttr(s) {
     return escapeHtml(s).replace(/"/g, '&quot;');
   }
-  async function renderAll() {
+  async function renderAll(preservePage = false) {
     pageSize = C.normalizePageSize(ws.preferences.itemsPerPage);
     $('#items-per-page').value = pageSize;
     document.documentElement.style.setProperty('--thumb', ws.preferences.thumbSize +
@@ -3211,7 +3262,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     updateScanTypeSummary();
     renderRoots();
     await renderWorkspaceState();
-    await renderResults();
+    await renderResults(false, preservePage);
     renderScanActivity();
     renderResumeScan();
   }
@@ -3221,7 +3272,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     liveRenderTimer = setTimeout(async () => {
       liveRenderTimer = null;
       if (gridPointerActive || Date.now() < interactionUntil || $('#inspect-dialog').open) {scheduleLiveResults();return;}
-      await renderResults(true);
+      const afterReview = deferredGridPreserve,preserve = afterReview || Boolean(scanController);deferredGridPreserve = false;
+      await renderResults(!afterReview, preserve);
     },
     1000);
   }
@@ -4232,8 +4284,15 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     await db.run('COMMIT');
     }catch(error){try{await db.run('ROLLBACK');}catch(_){}ws.events.length=eventCount;await installCatalog(ws);toast('Review changes could not be saved: '+error.message,true);return;}
     selected.clear();
+    if (status !== activeBucket) {
+      const removed = new Set(keys),grid = $('#results');grid.style.minHeight = grid.getBoundingClientRect().height + 'px';
+      for (const node of grid.querySelectorAll('.card')) if (removed.has(node.dataset.key)) disposeCard(node);
+      visibleCards = visibleCards.filter(card => !removed.has(card.key));
+      if ($('#inspect-dialog').open) inspectIndex = Math.min(inspectIndex, Math.max(0, visibleCards.length - 1));
+      patchSelection();
+    }
     await setDirty();
-    await renderResults();
+    await renderResults(false, true);
     if ($('#inspect-dialog').open && inspectIndex >= 0) await renderInspector();
   }
   async function verifyInspectorFullHash() {
@@ -5509,7 +5568,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     activeBucket = 'TO_REVIEW';
     $$('.bucket').forEach((bucket) => bucket.classList.toggle('active',
     bucket.dataset.bucket === 'TO_REVIEW'));
-    $('#sort').value = 'scan-asc';
+    $('#sort').value = 'found-asc';
     page = 1;
     selected.clear();
     lastSelectionAnchor = null;
@@ -5587,6 +5646,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     $('#root-filter').value = '';
     $('#preview-filter').checked = false;
     $('#source-filter').checked = false;
+    $('#sort').value = 'found-asc';
+    previewRecoveryAttempted.clear();
     ws.preferences.visibleExtensions = new Set(C.ALL_EXTENSIONS);
     renderTypeChecks($('#visible-types'), ws.preferences.visibleExtensions, 'visible');
     selected.clear();
@@ -5621,13 +5682,13 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     const keys = currentPageKeys();
     await MediaDatabase.arrayForEach(keys, async (k) => await selected.add(k));
     lastSelectionAnchor = keys.at(-1) || null;
-    await renderResults();
+    patchSelection();
   }
   );
   $('#clear-selection').addEventListener('click', async () => {
     selected.clear();
     lastSelectionAnchor = null;
-    await renderResults();
+    patchSelection();
   }
   );
   async function goToPage(requestedPage) {

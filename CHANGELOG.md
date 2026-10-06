@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.2.4 — October 6, 2026
+
+- Use stable Found order by default and add Reset view to clear sorting and filters.
+- Preserve the saved sequence when resuming, with newly found items appended at the end.
+- Load only the replacements needed after review actions, preserving the remaining cards and previews.
+- Update location totals without rebuilding cards or reloading their thumbnails.
+- Keep displayed items in place during automatic scan updates, and prepare replacement cards before updating the grid.
+
 ## 3.2.3 — October 6, 2026
 
 - Discover folders while processing media, so folder reads can overlap fingerprinting and preview creation.
