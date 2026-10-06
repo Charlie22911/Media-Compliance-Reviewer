@@ -44,7 +44,7 @@ Evidence preserves an encrypted original in the database and requires an Evidenc
 
 Use **Maintenance → Upgrade database** to update an older database format. Save an upgraded copy when requested. Maintenance also provides integrity checks and cleanup tools; read their descriptions before making permanent changes.
 
-The browser keeps a working copy on this computer. That storage is not a backup and may be removed when browser data is cleared. Keep regular copies of the saved portable database. The wrapped edition requires reopening the saved database; standalone browser recovery, when offered, uses a saved local snapshot.
+The browser keeps a working copy locally. That storage is not a backup and may be removed when browser data is cleared. Keep regular copies of the saved portable database. The wrapped edition requires reopening the saved database; standalone browser recovery, when offered, uses a saved local snapshot.
 
 Allow enough disk space for the working copy and saved snapshots. Saved previews increase the database's size as the collection grows. Evidence capture is blocked if adding an original would exceed the 500 MiB database safety limit. Opening and saving large databases can take time; watch the progress indicators.
 
