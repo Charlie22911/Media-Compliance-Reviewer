@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.2.6 — October 6, 2026
+
+- Keep folder traversal within the Forge iterator limit, including deep folder trees.
+- Release temporary source handles while preserving shared connections.
+- Retry recoverable folder reads, media reads, fingerprints, and database operations up to three times after the initial attempt.
+- Roll back failed database batches before replaying them, preserving completed records and pending writes.
+- Serialize database snapshots with scan transactions so automatic saves do not fail from transaction contention.
+
 ## 3.2.5 — October 6, 2026
 
 - Fit shows the full image within the thumbnail frame; Fill crops around the center.

@@ -3,7 +3,7 @@ import * as SQLite from '../vendor/wa-sqlite/src/sqlite-api.js';
 import {IDBBatchAtomicVFS} from '../vendor/wa-sqlite/src/examples/IDBBatchAtomicVFS.js';
 
 const STORAGE='photo-audit-sqlite-pages-v1',CHUNK=1024*1024;
-let engine,sqlite,vfs,storage,chain=Promise.resolve(),nextId=0;
+let engine,sqlite,vfs,storage,chain=Promise.resolve();
 const sessionId=crypto.randomUUID(),sessionLock='photo-audit-database-session:'+sessionId;
 let releaseSession;
 const databases=new Map(),snapshots=new Map(),cursors=new Map();
@@ -98,9 +98,9 @@ class Database {
  async run(sql,params=[]){await this.exec(sql,params);return true;}
  prepare(sql){let params=[],rows=null,index=0;return{bind(value){params=value;rows=null;index=0;},run:async value=>{await this.run(sql,value||params);rows=null;},step:async()=>{if(rows===null)rows=(await this.exec(sql,params))[0]?.values||[];return index++<rows.length;},get:()=>rows[index-1],free(){rows=null;}};}
  async batch(commands,preview=null){
-  await this.run('BEGIN IMMEDIATE');
+  try{await this.run('BEGIN IMMEDIATE');}catch(error){error.retrySafe=true;throw error;}
   try{for(const command of commands)await this.run(command.sql,command.params);const rows=preview?await this.exec(preview.sql,preview.params):null;await this.run(preview?'ROLLBACK':'COMMIT');return rows;}
-  catch(e){try{await this.run('ROLLBACK');}catch(_){}throw e;}
+  catch(e){try{await this.run('ROLLBACK');e.retrySafe=true;}catch(_){}throw e;}
  }
  async snapshot(){
   if(this.transaction)throw new Error('Finish the active transaction before saving.');
@@ -114,15 +114,25 @@ class Database {
  async close(){await this.clear();if(this.pointer)await sqlite.close(this.pointer);await removeFile(this.path);databases.delete(this.id);}
 }
 const actions={
- async open({input}){await boot();const id=++nextId,path='/work-'+crypto.randomUUID()+'.sqlite';let db;try{if(input?.snapshot){const value=snapshots.get(input.snapshot);if(!value)throw new Error('Recovery snapshot unavailable.');await copyFile(value.path,path);}else await importFile(path,input||new Blob());const pointer=await sqlite.open_v2(path,SQLite.SQLITE_OPEN_READWRITE|SQLite.SQLITE_OPEN_CREATE,'media-idb');db=new Database(id,path,pointer);databases.set(id,db);await db.run('PRAGMA cache_size=-8192; PRAGMA temp_store=FILE; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');return{id};}catch(e){try{if(db)await db.close();else await removeFile(path);}catch(_){}databases.delete(id);throw e;}},
+ async open({input}){await boot();const id=crypto.randomUUID(),path='/work-'+crypto.randomUUID()+'.sqlite';let db;try{if(input?.snapshot){const value=snapshots.get(input.snapshot);if(!value)throw new Error('Recovery snapshot unavailable.');await copyFile(value.path,path);}else await importFile(path,input||new Blob());const pointer=await sqlite.open_v2(path,SQLite.SQLITE_OPEN_READWRITE|SQLite.SQLITE_OPEN_CREATE,'media-idb');db=new Database(id,path,pointer);databases.set(id,db);await db.run('PRAGMA cache_size=-8192; PRAGMA temp_store=FILE; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');return{id};}catch(e){try{if(db)await db.close();else await removeFile(path);}catch(_){}databases.delete(id);throw e;}},
  async query({id,sql,params,token}){const db=databases.get(id);if(db.transaction&&db.transaction!==token)throw new Error('Database transaction is busy.');return db.exec(sql,params);},
  async cursorOpen({id,sql,params,token}){const db=databases.get(id);if(db.transaction&&db.transaction!==token)throw new Error('Database transaction is busy.');let statement;for await(const stmt of sqlite.statements(db.pointer,sql,{unscoped:true})){if(statement){await sqlite.finalize(stmt);await sqlite.finalize(statement);throw new Error('Only one streaming query is allowed.');}statement=stmt;}if(!statement)throw new Error('Empty streaming query.');try{sqlite.bind_collection(statement,params||[]);}catch(error){await sqlite.finalize(statement);throw error;}const cursor=crypto.randomUUID();cursors.set(cursor,{id,statement});return cursor;},
  async cursorStep({cursor}){const value=cursors.get(cursor);if(!value)return null;if(await sqlite.step(value.statement)===SQLite.SQLITE_ROW)return sqlite.row(value.statement);await actions.cursorFree({cursor});return null;},
  async cursorFree({cursor}){const value=cursors.get(cursor);if(value){cursors.delete(cursor);await sqlite.finalize(value.statement);}},
- async begin({id,token}){const db=databases.get(id);if(db.transaction)throw new Error('Database transaction is busy.');await db.run('BEGIN IMMEDIATE');db.transaction=token;},
- async commit({id,token}){const db=databases.get(id);if(db.transaction!==token)throw new Error('Database transaction changed.');await db.run('COMMIT');db.transaction=null;},
+ async begin({id,token}){const db=databases.get(id);if(db.transaction)throw new Error('Database transaction is busy.');try{await db.run('BEGIN IMMEDIATE');}catch(error){error.retrySafe=true;throw error;}db.transaction=token;},
+ async commit({id,token}){const db=databases.get(id);if(db.transaction!==token)throw new Error('Database transaction changed.');try{await db.run('COMMIT');}catch(error){error.retrySafe=error.code===SQLite.SQLITE_BUSY||error.code===SQLite.SQLITE_LOCKED;throw error;}db.transaction=null;},
  async rollback({id,token}){const db=databases.get(id);if(db.transaction!==token)throw new Error('Database transaction changed.');try{await db.run('ROLLBACK');}finally{db.transaction=null;}},
- async batch({id,commands,token}){if(commands.length>32)throw new Error('Database batch exceeds its limit.');const db=databases.get(id);if(db.transaction){if(db.transaction!==token)throw new Error('Database transaction is busy.');for(const command of commands)await db.run(command.sql,command.params);return;}return db.batch(commands);},
+ async batch({id,commands,token}){
+  if(commands.length>32)throw new Error('Database batch exceeds its limit.');const db=databases.get(id);
+  if(db.transaction){
+   if(db.transaction!==token)throw new Error('Database transaction is busy.');
+   try{await db.run('SAVEPOINT media_rpc_batch');}catch(error){error.retrySafe=true;throw error;}
+   try{for(const command of commands)await db.run(command.sql,command.params);await db.run('RELEASE media_rpc_batch');}
+   catch(error){try{await db.run('ROLLBACK TO media_rpc_batch');await db.run('RELEASE media_rpc_batch');error.retrySafe=true;}catch(_){}throw error;}
+   return;
+  }
+  return db.batch(commands);
+ },
  async upgrade({id,schema}){const db=databases.get(id);await db.run(schema);return await ImageReviewerCore.upgradeDatabase(db);},
  async snapshot({id}){return databases.get(id).snapshot();},
  async read({token,start,end}){const value=snapshots.get(token);if(!value)throw new Error('Database snapshot expired.');return readFile(value.path,start,Math.min(end,value.size));},
@@ -132,4 +142,4 @@ const actions={
  async close({id}){for(const [cursor,value]of cursors)if(value.id===id)await actions.cursorFree({cursor});await databases.get(id)?.close();},
  async diagnostics(){return{backend:'IndexedDB pages',databaseCopies:databases.size,wasmBytes:engine.HEAPU8.buffer.byteLength,statementCount:[...databases.values()].reduce((n,db)=>n+db.cache.size,0)};}
 };
-self.onmessage=e=>{const {requestId,method,args}=e.data;chain=chain.catch(()=>{}).then(async()=>{try{if(!Object.hasOwn(actions,method))throw new Error('Unknown database request.');const result=await actions[method](args||{});self.postMessage({requestId,result});}catch(error){self.postMessage({requestId,error:String(error.message||error)});}});};
+self.onmessage=e=>{const {requestId,method,args}=e.data;chain=chain.catch(()=>{}).then(async()=>{try{if(!Object.hasOwn(actions,method))throw new Error('Unknown database request.');const result=await actions[method](args||{});self.postMessage({requestId,result});}catch(error){self.postMessage({requestId,error:String(error.message||error),errorName:error.name||'Error',retrySafe:error.retrySafe===true});}});};

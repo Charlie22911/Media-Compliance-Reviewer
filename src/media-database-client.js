@@ -5,12 +5,15 @@
  function localCall(method,args){
   if(waiting.length>=32)return Promise.reject(new Error('Database request queue is full. Retry when the current operation finishes.'));
   if(!worker){const url=URL.createObjectURL(new Blob([document.querySelector('#database-worker-source').textContent],{type:'text/javascript'}));worker=new Worker(url);URL.revokeObjectURL(url);
-   worker.onmessage=e=>{const item=pending.get(e.data.requestId);if(!item)return;pending.delete(e.data.requestId);inFlight--;e.data.error?item.reject(new Error(e.data.error)):item.resolve(e.data.result);sendNext();};
+   worker.onmessage=e=>{const item=pending.get(e.data.requestId);if(!item)return;pending.delete(e.data.requestId);inFlight--;e.data.error?item.reject(Object.assign(new Error(e.data.error),{name:e.data.errorName||'Error',retrySafe:e.data.retrySafe===true})):item.resolve(e.data.result);sendNext();};
    worker.onerror=e=>{for(const item of [...pending.values(),...waiting])item.reject(new Error(e.message||'Database worker failed.'));pending.clear();waiting.length=0;inFlight=0;worker.terminate();worker=null;};
   }
   return new Promise((resolve,reject)=>{waiting.push({requestId:++sequence,method,args,resolve,reject});sendNext();});
  }
- const rpc=(method,args={})=>typeof g.__MediaDatabaseRPC==='function'?g.__MediaDatabaseRPC(method,args):localCall(method,args);
+ const rpc=async(method,args={})=>{
+  try{const value=await(typeof g.__MediaDatabaseRPC==='function'?g.__MediaDatabaseRPC(method,args):localCall(method,args));if(value?.__mediaDatabaseError)throw Object.assign(new Error(value.message),{name:value.name||'Error',retrySafe:value.retrySafe===true});return value;}
+  catch(error){if(/Database request queue is full/.test(error.message))error.retrySafe=true;throw error;}
+ };
  class Snapshot {
   constructor(value){this.token=value.token;this.size=value.size;this.type='application/vnd.sqlite3';}
   slice(start=0,end=this.size){return{arrayBuffer:async()=>{const value=await rpc('read',{token:this.token,start,end});return value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength);}};}
@@ -18,33 +21,45 @@
   async asBlob(){const parts=[];for(let at=0;at<this.size;at+=1024*1024)parts.push(new Blob([await this.slice(at,Math.min(this.size,at+1024*1024)).arrayBuffer()]));return new Blob(parts,{type:this.type});}
  }
  class Database {
-  constructor(id){this.id=id;this.pending=[];this.flushPromise=null;this.timer=null;this.transaction=null;this.closed=false;this.beginChain=Promise.resolve();}
+  constructor(id){this.id=id;this.pending=[];this.flushPromise=null;this.timer=null;this.transaction=null;this.closed=false;this.beginChain=Promise.resolve();this.retryDelayMs=250;this.uncertainWrite=null;}
   static async open(input){const result=await rpc('open',{input});return new Database(result.id);}
-  enqueue(sql,params=[]){if(this.closed)throw new Error('Database changed.');this.pending.push({sql:String(sql),params});if(this.pending.length>=32)this.flush().catch(e=>{this.error=e;});else if(!this.timer)this.timer=setTimeout(()=>{this.timer=null;this.flush().catch(e=>{this.error=e;});},4);}
+  enqueue(sql,params=[]){if(this.closed)throw new Error('Database changed.');if(this.uncertainWrite)throw this.uncertainWrite;this.pending.push({sql:String(sql),params});if(this.pending.length>=32)this.flush().catch(e=>{this.error=e;});else if(!this.timer)this.timer=setTimeout(()=>{this.timer=null;this.flush().catch(e=>{this.error=e;});},4);}
+  async retry(method,args,safe){
+   for(let attempt=0;;attempt++)try{return await rpc(method,args);}catch(error){
+    const permanent=/cancelled|canceled|invalid|unsupported|corrupt|malformed|syntax error|constraint failed|no such table|database changed|quota|disk.*full/i.test(error.message);
+    if(attempt>=3||permanent||!safe(error))throw error;
+    if(typeof g.CustomEvent==='function')g.dispatchEvent?.(new g.CustomEvent('media-database-retry',{detail:{method,attempt:attempt+1,message:error.message}}));
+    await new Promise(resolve=>setTimeout(resolve,this.retryDelayMs*2**attempt));
+   }
+  }
+  boundary(operation){const result=this.beginChain.catch(()=>{}).then(operation);this.beginChain=result.catch(()=>{});return result;}
   async flush(){
-   clearTimeout(this.timer);this.timer=null;if(this.error)throw this.error;
+   clearTimeout(this.timer);this.timer=null;if(this.uncertainWrite)throw this.uncertainWrite;
    if(this.flushPromise){await this.flushPromise;if(this.pending.length)return this.flush();return;}
-   this.flushPromise=(async()=>{while(this.pending.length){const commands=this.pending.splice(0,32);await rpc('batch',{id:this.id,commands,token:this.transaction?.token});}})();
+   this.flushPromise=(async()=>{while(this.pending.length){const commands=this.pending.splice(0,32),token=this.transaction?.token;
+    try{await this.retry('batch',{id:this.id,commands,token},error=>error.retrySafe===true);this.error=null;}
+    catch(error){this.pending.unshift(...commands);if(!error.retrySafe)this.uncertainWrite=error;throw error;}
+   }})();
    try{await this.flushPromise;}catch(error){this.error=error;throw error;}finally{this.flushPromise=null;}
   }
   async idle(){while(this.transaction)await this.transaction.done;await this.flush();}
   async run(sql,params=[]){
    sql=String(sql);
    if(/^\s*BEGIN\b/i.test(sql)){
-    this.beginChain=this.beginChain.catch(()=>{}).then(async()=>{await this.idle();let resolve;this.transaction={token:crypto.randomUUID(),done:new Promise(r=>resolve=r),resolve};try{await rpc('begin',{id:this.id,token:this.transaction.token});}catch(e){this.transaction.resolve();this.transaction=null;throw e;}});await this.beginChain;return this;
+    await this.boundary(async()=>{await this.idle();let resolve;this.transaction={token:crypto.randomUUID(),done:new Promise(r=>resolve=r),resolve};try{await this.retry('begin',{id:this.id,token:this.transaction.token},error=>error.retrySafe===true);}catch(e){if(!e.retrySafe){try{await rpc('rollback',{id:this.id,token:this.transaction.token});}catch(_){this.uncertainWrite=e;}}this.transaction.resolve();this.transaction=null;throw e;}});return this;
    }
    if(/^\s*(COMMIT|END|ROLLBACK)\b/i.test(sql)){
     const transaction=this.transaction;if(!transaction)throw new Error('No database transaction is active.');
-    try{if(/^\s*ROLLBACK\b/i.test(sql)){this.pending.length=0;if(this.flushPromise)try{await this.flushPromise;}catch(_){}this.error=null;await rpc('rollback',{id:this.id,token:transaction.token});}else{await this.flush();await rpc('commit',{id:this.id,token:transaction.token});}}
-    catch(error){if(!/^\s*ROLLBACK\b/i.test(sql)){this.pending.length=0;try{await rpc('rollback',{id:this.id,token:transaction.token});}catch(_){}this.error=null;}throw error;}
+    try{if(/^\s*ROLLBACK\b/i.test(sql)){this.pending.length=0;if(this.flushPromise)try{await this.flushPromise;}catch(_){}this.pending.length=0;this.error=null;await rpc('rollback',{id:this.id,token:transaction.token});this.uncertainWrite=null;}else{await this.flush();await this.retry('commit',{id:this.id,token:transaction.token},error=>error.retrySafe===true);}}
+    catch(error){this.pending.length=0;if(!/^\s*ROLLBACK\b/i.test(sql)){try{await rpc('rollback',{id:this.id,token:transaction.token});this.uncertainWrite=null;}catch(_){this.uncertainWrite=error;}}else this.uncertainWrite=error;this.error=error;throw error;}
     finally{transaction.resolve();this.transaction=null;}return this;
    }
    this.enqueue(sql,params);await this.flush();return this;
   }
-  async exec(sql,params=[]){await this.flush();return rpc('query',{id:this.id,sql:String(sql),params,token:this.transaction?.token});}
+  async exec(sql,params=[]){await this.flush();sql=String(sql);return this.retry('query',{id:this.id,sql,params,token:this.transaction?.token},()=>/^\s*SELECT\b/i.test(sql));}
   prepare(sql){let params=[],cursor=null,row=null;const free=async()=>{if(cursor){const value=cursor;cursor=null;await rpc('cursorFree',{cursor:value});}row=null;};return{bind(value){if(cursor)throw new Error('Finish the previous query before rebinding.');params=value;},run:async value=>{await free();await this.run(sql,value||params);},step:async()=>{await this.flush();if(!cursor)cursor=await rpc('cursorOpen',{id:this.id,sql,params,token:this.transaction?.token});row=await rpc('cursorStep',{cursor});return row!==null;},get:()=>row,free};}
   async upgrade(schema){await this.idle();return rpc('upgrade',{id:this.id,schema});}
-  async exportBlob(){await this.idle();return new Snapshot(await rpc('snapshot',{id:this.id}));}
+  async exportBlob(){return this.boundary(async()=>{await this.idle();return new Snapshot(await this.retry('snapshot',{id:this.id},()=>true));});}
   async close(){if(this.closed)return;if(this.transaction)await this.run('ROLLBACK');try{await this.flush();}catch(_){}await rpc('close',{id:this.id});this.closed=true;}
  }
  async function recordStore(database,kind,limit=256){

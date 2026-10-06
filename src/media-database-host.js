@@ -7,7 +7,7 @@ function createMediaDatabaseHost(source){
  return(method,args)=>{
   if(!methods.has(method))return Promise.reject(new Error('Unknown database request.'));
   if(waiting.length>=32)return Promise.reject(new Error('Database request queue is full. Retry when the current operation finishes.'));
-  if(!worker){const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));worker=new Worker(url);URL.revokeObjectURL(url);worker.onmessage=e=>{const item=pending.get(e.data.requestId);if(!item)return;pending.delete(e.data.requestId);active--;e.data.error?item.reject(new Error(e.data.error)):item.resolve(e.data.result);drain();};worker.onerror=e=>fail(new Error(e.message||'Database worker failed.'));}
+  if(!worker){const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));worker=new Worker(url);URL.revokeObjectURL(url);worker.onmessage=e=>{const item=pending.get(e.data.requestId);if(!item)return;pending.delete(e.data.requestId);active--;item.resolve(e.data.error?{__mediaDatabaseError:true,message:e.data.error,name:e.data.errorName||'Error',retrySafe:e.data.retrySafe===true}:e.data.result);drain();};worker.onerror=e=>fail(new Error(e.message||'Database worker failed.'));}
   return new Promise((resolve,reject)=>{waiting.push({requestId:++sequence,method,args,resolve,reject});drain();});
  };
 }

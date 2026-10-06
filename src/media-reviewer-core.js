@@ -194,16 +194,44 @@
     );
     return count;
   }
+  function retryableError(error) {
+    return error?.name !== 'AbortError' && !/cancelled|canceled|invalid|unsupported|corrupt|malformed|syntax error|constraint failed|no such table|database changed|quota|disk.*full/i.test(String(error?.message || error));
+  }
+  async function retryDelay(milliseconds, controller) {
+    let remaining = milliseconds;
+    while (remaining > 0) {if (controller?.cancelled) throw new DOMException('Scan cancelled','AbortError');const delay=Math.min(50,remaining);await new Promise(resolve=>setTimeout(resolve,delay));remaining-=delay;}
+    if (controller?.cancelled) throw new DOMException('Scan cancelled','AbortError');
+  }
+  async function retryOperation(operation, options = {}) {
+    const check = () => {if (options.controller?.cancelled) throw new DOMException('Scan cancelled', 'AbortError');};
+    for (let retry = 0; ; retry++) {
+      check();
+      try {return await operation(retry);} catch (error) {
+        if (retry >= 3 || !retryableError(error)) {try {error.retryAttempts = retry;} catch (_) {}throw error;}
+        check();options.onRetry?.(error, retry + 1);check();
+        await retryDelay((options.delayMs ?? 250) * 2 ** retry, options.controller);
+      }
+    }
+  }
   async function resolveRelativeFile(rootHandle, relativePath) {
     const parts = pathParts(relativePath);
     if (!rootHandle || !parts.length || parts.some((part) => part === '..')) throw new Error(
       'The saved relative path is invalid.');
-    let directory = rootHandle;
-    for (const part of parts.slice(0, -1)) {
-      directory = await directory.getDirectoryHandle(part);
-    }
-    const handle = await directory.getFileHandle(parts.at(-1));
-    return await handle.getFile();
+    let directory = rootHandle,handle = null;
+    const release = async value => {
+      if (!value?.release) return;
+      try {await retryOperation(() => value.release());} catch (error) {
+        if (typeof g.CustomEvent === 'function') g.dispatchEvent?.(new g.CustomEvent('media-source-cleanup-error',{detail:{message:String(error.message || error)}}));
+      }
+    };
+    try {
+      for (const part of parts.slice(0, -1)) {
+        const next = await directory.getDirectoryHandle(part),previous = directory;directory = next;
+        if (previous !== rootHandle) await release(previous);
+      }
+      handle = await directory.getFileHandle(parts.at(-1));
+      return await handle.getFile();
+    } finally {await release(handle);if (directory !== rootHandle) await release(directory);}
   }
   function zipCrc32(bytes) {
     let crc = 0xffffffff;
@@ -893,7 +921,7 @@
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.5', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.6', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -921,7 +949,7 @@
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.2.5', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.2.6', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -1145,7 +1173,7 @@
     normalizeScanMode, createScanConfig, shouldUseQuickHash, quickHashRanges,
     quickHashIdentity, shouldSkipAge, homeShareUser, shouldSkipPathForScan, fitPathSuffix,
     resumeFileMatches, latestIncompleteScan, abandonIncompleteScans, compareOccurrences,
-    resolveRelativeFile, zipCrc32, workspaceFileVersionsMatch, diffRowSnapshots,
+    resolveRelativeFile, retryOperation, retryableError, retryDelay, zipCrc32, workspaceFileVersionsMatch, diffRowSnapshots,
     readZipDirectory,
     readBoundedDecompression, extractZipEntry, decodeTiff,
     collectDirectoryEntries,

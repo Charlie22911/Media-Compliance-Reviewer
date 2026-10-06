@@ -9,5 +9,5 @@ if(hostStart<0||actionsStart<0)throw Error('Missing trusted database host templa
 const worker=fs.readFileSync('.build/media-database-worker.bundle.js','utf8');
 const host=fs.readFileSync('src/media-database-host.js','utf8')+'\nconst mediaDatabaseCall=createMediaDatabaseHost('+JSON.stringify(worker).replace(/<\/script/gi,'<\\/script')+');\n';
 let result=shell.slice(0,hostStart)+host+shell.slice(actionsStart);
-result=result.replace(match[1],Buffer.from(updatedChild,'utf8').toString('base64'));fs.writeFileSync(name,result);
+result=result.replace(match[1],Buffer.from(updatedChild,'utf8').toString('base64'));result=require('./patch-forge-handles.cjs')(result);fs.writeFileSync(name,result);
 console.log('Packaged offline app:',result.length,'bytes');

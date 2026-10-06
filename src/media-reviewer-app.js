@@ -78,6 +78,10 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     scan.errors.push(error);
     logActivity('error', 'Scan item could not be read', typeof error === 'string' ? error : [error.path,error.message].filter(Boolean).join(': '));
   }
+  window.addEventListener('media-database-retry', event => {
+    logActivity('warning','Retrying database operation (' + event.detail.attempt + ' of 3)',event.detail.method + ': ' + event.detail.message);
+  });
+  window.addEventListener('media-source-cleanup-error', event => {logActivity('warning','A temporary source handle could not be released after retries',event.detail.message);});
   window.addEventListener('error', event => {if (event.message) logActivity('error','Application error',event.error?.stack || event.message);});
   window.addEventListener('unhandledrejection', event => {logActivity('error','Operation did not finish',event.reason?.stack || event.reason?.message || event.reason);toast('An operation failed. Open Log for details.', true);});
   function toast(message, error = false) {
@@ -762,30 +766,14 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   async function idbGet() {return MediaDatabase.rpc('recoveryGet');}
   async function hasThumbnail(hash) {
     if (!db) return false;
-    const stmt = db.prepare('SELECT 1 FROM thumbnails WHERE hash=? LIMIT 1');
-    try {
-      stmt.bind([hash]);
-      return await stmt.step();
-    } finally
-    {
-      await stmt.free();
-    }
+    return Boolean((await db.exec('SELECT 1 FROM thumbnails WHERE hash=? LIMIT 1',[hash]))[0]?.values.length);
   }
   async function getThumbnail(hash) {
     if (!db) return null;
-    const stmt = db.prepare('SELECT mime,width,height,bytes FROM thumbnails WHERE hash=?');
-    try {
-      stmt.bind([hash]);
-      if (!(await stmt.step())) return null;
-      const row = stmt.get();
-      await db.run('INSERT OR REPLACE INTO preview_access VALUES (?,?)', [hash, Date.now()]);
-      return {
-        mime: row[0], width: Number(row[1]), height: Number(row[2]), bytes: new Uint8Array(row[3])
-      };
-    } finally
-    {
-      await stmt.free();
-    }
+    const row = (await db.exec('SELECT mime,width,height,bytes FROM thumbnails WHERE hash=?',[hash]))[0]?.values[0];
+    if (!row) return null;
+    await db.run('INSERT OR REPLACE INTO preview_access VALUES (?,?)', [hash, Date.now()]);
+    return {mime:row[0],width:Number(row[1]),height:Number(row[2]),bytes:new Uint8Array(row[3])};
   }
   async function putThumbnail(hash, thumb) {
     if (thumb.bytes.byteLength > MAX_THUMBNAIL_BYTES) throw new Error('Preview exceeds the per-image storage limit.');
@@ -3566,29 +3554,42 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       Promise.resolve(promise).then(async (value) => await finish(null, value), async (error) => await finish(error));
     });
   }
+  async function scanRetry(operation, controller, label) {
+    try {return await C.retryOperation(operation,{controller,onRetry:(error,attempt)=>{
+      logActivity('warning','Retrying scan operation (' + attempt + ' of 3)',label + ': ' + String(error.message || error));
+      showOperation('Scan recovery',label + ' — retry ' + attempt + ' of 3');
+    }});} finally {finishOperation('Scan recovery');}
+  }
   async function runJournalScan(rootHandle, scan, scanConfig, onEntry, controller) {
     const journal = await C.scanJournal(db, scan.id, scan.rootId),errors = [];
-    const DIRECTORY_BATCH_SIZE = 32,MAX_DIRECTORY_FRAMES = 32,MAX_PENDING_FILES = 128,frames = [];
+    // Forge has 16 iterator slots. Leave room while prior reads are closing.
+    const DIRECTORY_BATCH_SIZE = 32,MAX_DIRECTORY_FRAMES = 8,MAX_PENDING_FILES = 128,frames = [],directoryRetries = new Map();
     let discovery = null,closing = false;
     const discoveryController = { get cancelled() {return controller.cancelled || closing;} };
+    const releaseHandle = async handle => {
+      if (!handle?.release) return;
+      try {await C.retryOperation(() => handle.release());}
+      catch (error) {logActivity('warning','A temporary source handle could not be released after retries',String(error.message || error));}
+    };
     if (!(await journal.count())) await journal.add('', 'directory');
     await db.run('INSERT OR REPLACE INTO scan_job_meta VALUES (?,?)', [scan.id, JSON.stringify(scan.config)]);
     const resolveDirectory = async (path) => {
       let handle = rootHandle;
       try {
         for (const part of path.split('/').filter(Boolean)) {
-          const next = await boundedScanRead(handle.getDirectoryHandle(part), discoveryController, 'Opening folder');
-          if (handle !== rootHandle) await handle.release?.();handle = next;
+          const next = await scanRetry(() => boundedScanRead(handle.getDirectoryHandle(part), discoveryController, 'Opening folder'),discoveryController,'Opening folder ' + path);
+          const previous = handle;handle = next;
+          if (previous !== rootHandle) await releaseHandle(previous);
         }
         return handle;
       } catch (error) {
-        if (handle !== rootHandle) await handle.release?.();throw error;
+        if (handle !== rootHandle) await releaseHandle(handle);throw error;
       }
     };
     const closeFrame = async (frame) => {
       // A timed-out directory read may still be pending. Do not wait for return().
       Promise.resolve(frame.iterator.return?.()).catch(() => {});
-      if (frame.directory !== rootHandle) await frame.directory.release?.();
+      if (frame.directory !== rootHandle) await releaseHandle(frame.directory);
     };
     const readBatch = async (frame, limit) => {
       const result = { jobs: [], discovered: 0, done: false, error: null };
@@ -3604,7 +3605,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
             if (handle.kind === 'directory') result.jobs.push({ path, kind: 'directory' });else
             if (C.shouldProcessName(name, scanConfig.extensions) || scanConfig.scanArchives && C.extensionOf(name) === 'zip') result.jobs.push({ path, kind: 'file' });
             result.discovered++;
-          } finally {await handle.release?.();}
+          } finally {await releaseHandle(handle);}
         }
       } catch (error) {result.error = error;}
       return result;
@@ -3618,9 +3619,18 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       await db.flush();
       scan.discovered = (scan.discovered || 0) + result.discovered;
       if (result.done || result.error) {
-        await journal.finish(job.seq, result.error ? controller.cancelled ? 'pending' : 'failed' : 'complete', null, result.error ? String(result.error.message || result.error) : null);
+        const attempts = (directoryRetries.get(job.path) || 0) + 1;
+        const retry = result.error && !controller.cancelled && C.retryableError(result.error) && !result.error.retryAttempts && attempts <= 3;
+        await journal.finish(job.seq, result.error ? controller.cancelled || retry ? 'pending' : 'failed' : 'complete', null, result.error ? String(result.error.message || result.error) : null);
         if (frame) {frames.pop();await closeFrame(frame);}
-        if (result.error && !controller.cancelled) errors.push({ path: job.path, message: String(result.error.message || result.error) });
+        if (retry) {
+          directoryRetries.set(job.path,attempts);
+          logActivity('warning','Retrying folder listing (' + attempts + ' of 3)',job.path + ': ' + String(result.error.message || result.error));
+          try {await C.retryDelay(250 * 2 ** (attempts - 1),discoveryController);} catch (error) {if (!controller.cancelled || error.name !== 'AbortError') throw error;}
+        } else {
+          directoryRetries.delete(job.path);
+          if (result.error && !controller.cancelled) errors.push({ path: job.path, message: String(result.error.message || result.error) });
+        }
       }
       await setDirty();
     };
@@ -3930,7 +3940,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         }
         let file,hash,hashMethod = 'sha256',sampleDigest = null;
         try {
-          file = await boundedScanRead(entry.getFile(), controller, 'Opening media file');
+          file = await scanRetry(() => boundedScanRead(entry.getFile(), controller, 'Opening media file'),controller,'Opening ' + rel);
           if (controller.cancelled) return;
           if (!Number.isSafeInteger(file.size) || file.size <= 0) throw new Error('Empty or invalid media file.');
           if (C.shouldSkipAge(file.lastModified, scanConfig)) {scan.ageSkipped = (scan.ageSkipped || 0) + 1;return;}
@@ -3989,13 +3999,13 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         hashMethod = useQuick ? 'sampled-sha256-v1' : 'sha256';
         setScanStatus(`${useQuick ? 'Quick fingerprinting' : 'Hashing'} ${position}:`, rel);
         try {
-          const digest = await hashFile(controller, file, jobId, (m) => {
+          const digest = await scanRetry(() => hashFile(controller, file, C.cryptoRandom(), (m) => {
             const fileProgress = m.total ? m.done / m.total : 0,overall = total ?
               (index + fileProgress) / total : fileProgress;
             $('#scan-progress').style.width = `${overall * 100}%`;
           }, useQuick ? {
             type: 'quick-hash', ranges
-          } : {});
+          } : {}),controller,'Fingerprinting ' + rel);
           sampleDigest = useQuick ? digest : null;
           hash = useQuick ? C.quickHashIdentity(digest, rel) : digest;
         }
@@ -4017,7 +4027,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           if (manifest && (await ws.decisions[protectedKey])) candidates.push({ digest: manifest[0], decision: await ws.decisions[protectedKey] });
           if (candidates.length) {
             try {
-              const full = await hashFile(controller, file, C.cryptoRandom(), () => {});
+              const full = await scanRetry(() => hashFile(controller, file, C.cryptoRandom(), () => {}),controller,'Verifying ' + rel);
               const match = candidates.find((item) => item.digest === full);
               if (match) {hash = match.decision.hash;hashMethod = 'sha256';useQuick = false;}
             } catch (error) {
@@ -4075,7 +4085,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           }
         }
         if (!entry.archivePath && (entry.source?.getFile || options.rootHandle)) {
-          const current = await boundedScanRead(entry.getFile(), controller, 'Rechecking media file');
+          const current = await scanRetry(() => boundedScanRead(entry.getFile(), controller, 'Rechecking media file'),controller,'Rechecking ' + rel);
           if (controller.cancelled) return;
           if (current.size !== file.size || current.lastModified !== file.lastModified) {
             (await checkpoints[rel]).state = 'failed';(await checkpoints[rel]).error = 'Source changed during scan';

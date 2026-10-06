@@ -7,12 +7,14 @@ vm.createContext(context);
 vm.runInContext(fs.readFileSync(path.join(sourceRoot, 'src/media-reviewer-core.js'), 'utf8'), context);
 context.C = context.ImageReviewerCore;
 const app = fs.readFileSync(path.join(sourceRoot, 'src/media-reviewer-app.js'), 'utf8');
-for (const name of ['hashFile', 'boundedScanRead', 'runJournalScan']) {
+for (const name of ['hashFile', 'boundedScanRead', 'scanRetry', 'runJournalScan']) {
   const code = new RegExp('(?:async )?function ' + name + '\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}').exec(app);
   assert(code, name); vm.runInContext(code[0], context);
 }
 context.setDirty = async () => {};
 context.setScanStatus = () => {};
+context.logActivity = context.showOperation = context.finishOperation = () => {};
+context.C.retryDelay = async (_delay, controller) => {if(controller?.cancelled)throw new DOMException('Scan cancelled','AbortError');};
 context.emitEntryOrArchive = async (entry, consume) => consume(entry);
 const config = { extensions: new Set(['jpg']), scanArchives: false, excludeUserApplicationData: true };
 function directory(name, children, stats) {
@@ -45,6 +47,12 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     paths.push(entry.relativePath);
     context.ws.scanCheckpoints.scan[entry.relativePath] = { state: 'complete', occurrenceId: entry.relativePath };
     await entry.commitJob(entry.relativePath);
+  }
+  {
+    const { sqlite, scan, stats } = fresh(), paths = [], media = photo('cleanup.jpg');let releases = 0;
+    media.release = async () => {if (++releases <= 3) throw Error('Temporary handle release failure');};
+    const result = await context.runJournalScan(directory('cleanup', [media], stats), scan, config, entry => consume(entry, paths), { cancelled: false });
+    assert.equal(releases, 4, 'Temporary cleanup failures receive three retries');assert.equal(result.errors.length, 0);assert.deepEqual(paths, ['cleanup.jpg']);sqlite.close();
   }
   {
     const { sqlite, scan, stats } = fresh(), paths = [], controller = { cancelled: false };
@@ -154,7 +162,7 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     failing.entries = async function* () { for await (const entry of original.call(this)) { yield entry; if (fail) { fail = false; throw Error('Directory read failed'); } } };
     const root = directory('root', [failing], stats);
     const result = await context.runJournalScan(root, scan, config, entry => consume(entry, paths), controller);
-    assert.equal(result.errors.length, 1); assert.equal(paths.length, 1, 'Files found before a folder error remain processable');
+    assert.equal(result.errors.length, 0); assert.equal(paths.length, 2, 'A temporary folder read failure is retried automatically');
     assert.equal(stats.open, 0);
     await context.runJournalScan(root, scan, config, entry => consume(entry, paths), controller);
     assert.equal(paths.length, 2); assert.equal(new Set(paths).size, 2, 'A failed folder is retried without repeating completed files');
@@ -175,6 +183,13 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     assert.equal(result.errors.length,1,'A post-commit failure is reported');
     assert.equal(sqlite.exec("SELECT state FROM scan_jobs WHERE kind='file'")[0].values[0][0],'complete','A committed file job is preserved after later cleanup fails');
     sqlite.close();
+  }
+  {
+    const {sqlite,scan,stats}=fresh(),paths=[],controller={cancelled:false};
+    const failing=directory('broken',[photo('a.jpg')],stats),original=failing.entries;let visits=0;
+    failing.entries=async function*(){visits++;for await(const item of original.call(this))yield item;throw Error('Temporary directory listing failure');};
+    const result=await context.runJournalScan(directory('root',[failing],stats),scan,config,entry=>consume(entry,paths),controller);
+    assert.equal(visits,4,'A failed listing gets an initial attempt plus three retries');assert.equal(result.errors.length,1);assert.equal(paths.length,1,'Published files do not repeat across listing retries');sqlite.close();
   }
   console.log('Concurrent discovery, bounded backlog, transaction isolation, slow folder reads, cancellation/resume and bounded iterators passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

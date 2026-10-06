@@ -52,6 +52,8 @@ Allow enough disk space for the working copy and saved snapshots. Saved previews
 
 ## Activity log and review feedback
 
+Recoverable folder reads, file reads, fingerprinting, and database operations receive an initial attempt plus up to three retries with short pauses. Retry attempts appear in **Log**, and cancellation remains available while waiting. A failed folder listing is reopened; saved checkpoints prevent completed files from being processed again. Database batches are replayed only when rollback has confirmed a safe outcome, and automatic saves wait for scan transactions. Permanent problems such as invalid data or exhausted storage require a different action. If a worker failure leaves a write unconfirmed, reopen the last saved database before continuing.
+
 Open **Log** beside About and Help to see recent activity, errors, and why a scan ended. The log includes up to 500 session entries, saved summaries from the last five scans, and up to 20 recent read errors per saved scan. Saved scan details travel with the database; other activity lasts until the tool closes or reloads. **Save log as text** downloads the displayed details. Logs can contain filenames and paths.
 
 Click a thumbnail or checkbox to select it, then choose a selected-item action such as **Compliant**. The bucket tabs switch the results you are viewing. Review buttons pause while an action saves. Failed review writes retain the selection for retry. When items move out of the current bucket, a compact loading box appears while the page fills; the previous page height is released.
@@ -68,7 +70,7 @@ npm run build
 npm run check
 ```
 
-The optional scanner and live-results regression checks use Node.js 24 or later: run `npm run test:scan` and `npm run test:results`.
+The optional scanner and live-results regression checks use Node.js 24 or later: run `npm run test:scan`, `npm run test:results`, and `npm run test:recovery`.
 
 The build uses the vendored runtimes and embedded HTML templates. The app does not download code or decoder assets at runtime. External license links in About open websites only when clicked.
 
