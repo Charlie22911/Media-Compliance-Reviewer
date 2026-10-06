@@ -1,0 +1,13 @@
+const fs=require('fs');
+const name='Media-Compliance-Reviewer.html',shell=fs.readFileSync(name,'utf8'),source=fs.readFileSync('Media-Compliance-Reviewer-Standalone.html','utf8');
+const match=/const CHILD_HTML_B64 = "([^"]+)"/.exec(shell);if(!match)throw Error('Missing Forge child template');
+const child=Buffer.from(match[1],'base64').toString('utf8'),marker='<meta charset="utf-8">',start=child.indexOf(marker),sourceStart=source.indexOf(marker);
+if(start<0||sourceStart<0)throw Error('Missing application template boundary');
+const updatedChild=child.slice(0,start)+source.slice(sourceStart);
+const hostStart=shell.indexOf('function createMediaDatabaseHost('),actionsStart=shell.indexOf('const actionMap = {',hostStart);
+if(hostStart<0||actionsStart<0)throw Error('Missing trusted database host template');
+const worker=fs.readFileSync('.build/media-database-worker.bundle.js','utf8');
+const host=fs.readFileSync('src/media-database-host.js','utf8')+'\nconst mediaDatabaseCall=createMediaDatabaseHost('+JSON.stringify(worker).replace(/<\/script/gi,'<\\/script')+');\n';
+let result=shell.slice(0,hostStart)+host+shell.slice(actionsStart);
+result=result.replace(match[1],Buffer.from(updatedChild,'utf8').toString('base64'));fs.writeFileSync(name,result);
+console.log('Packaged offline app:',result.length,'bytes');
