@@ -50,6 +50,14 @@ The browser keeps a working copy locally. That storage is not a backup and may b
 
 Allow enough disk space for the working copy and saved snapshots. Saved previews increase the database's size as the collection grows. Evidence capture checks the estimated total database size before adding an encrypted original. The default threshold is **2.5 GB**. To raise it, open **Maintenance → Database size limit for Evidence** and choose **5 GB**, then save the database. The choice is kept with that database. Normal scans can continue beyond this threshold while browser storage is available; existing records and previews are kept. Browser storage availability can impose a lower limit. Opening and saving large databases can take time; watch the progress indicators.
 
+## Activity log and review feedback
+
+Open **Log** beside About and Help to see recent activity, errors, and why a scan ended. The log includes up to 500 session entries, saved summaries from the last five scans, and up to 20 recent read errors per saved scan. Saved scan details travel with the database; other activity lasts until the tool closes or reloads. **Save log as text** downloads the displayed details. Logs can contain filenames and paths.
+
+Click a thumbnail or checkbox to select it, then choose a selected-item action such as **Compliant**. The bucket tabs switch the results you are viewing. Review buttons pause while an action saves. Failed review writes retain the selection for retry. When items move out of the current bucket, a compact loading box appears while the page fills; the previous page height is released.
+
+**Fit** shows the entire image within the thumbnail frame. **Fill** fills the frame and crops around the center.
+
 ## Source and building
 
 The two HTML files are ready to use. To rebuild them, install Node.js 18 or later, then run:

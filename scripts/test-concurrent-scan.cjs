@@ -168,5 +168,13 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     assert.equal(stats.visits.done, undefined, 'Completed directories are not listed again');
     assert.equal(paths.length, 1); sqlite.close();
   }
+  {
+    const { sqlite, scan, stats } = fresh(), paths = [],controller = {cancelled:false};
+    const root = directory('root',[photo('a.jpg')],stats);
+    const result = await context.runJournalScan(root,scan,config,async entry => {await consume(entry,paths);throw Error('Preview cleanup failed after commit');},controller);
+    assert.equal(result.errors.length,1,'A post-commit failure is reported');
+    assert.equal(sqlite.exec("SELECT state FROM scan_jobs WHERE kind='file'")[0].values[0][0],'complete','A committed file job is preserved after later cleanup fails');
+    sqlite.close();
+  }
   console.log('Concurrent discovery, bounded backlog, transaction isolation, slow folder reads, cancellation/resume and bounded iterators passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

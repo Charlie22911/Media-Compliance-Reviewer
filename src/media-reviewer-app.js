@@ -51,7 +51,37 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     i++) out[i] = b.charCodeAt(i);
     return out;
   }
+  const activityLog = [],MAX_LOG_ENTRIES = 500;
+  let reviewActionInFlight = false,reviewWriteInFlight = false,reviewRevision = 0;
+  function logActivity(level, message, detail = '') {
+    const entry = { at: new Date().toISOString(), level, message: String(message).slice(0,2000), detail: String(detail).slice(0,2000) };
+    const previous = activityLog.at(-1);
+    if (previous && previous.level === level && previous.message === entry.message && previous.detail === entry.detail) {previous.repeats = (previous.repeats || 1) + 1;previous.at = entry.at;} else activityLog.push(entry);
+    if (activityLog.length > MAX_LOG_ENTRIES) activityLog.splice(0, activityLog.length - MAX_LOG_ENTRIES);
+    if ($('#log-dialog')?.open) renderLog();
+  }
+  function logEntries() {
+    // Saved scan summaries remain available after reopening; detailed activity is session-only.
+    const saved = Object.values(ws.scans).sort((a,b) => String(b.startedAt).localeCompare(String(a.startedAt))).slice(0,5).reverse().flatMap(scan => {
+      const entries = [];
+      if (scan.stopReason) entries.push({ at: scan.completedAt || scan.startedAt, level: scan.stopKind === 'error' ? 'error' : 'info', message: scan.stopReason, detail: ws.roots[scan.rootId]?.label || '' });
+      const errors = scan.errors || [];
+      for (const error of errors.slice(-20)) entries.push({ at: scan.completedAt || scan.startedAt, level: 'error', message: 'Saved scan error', detail: typeof error === 'string' ? error : [error.path,error.message].filter(Boolean).join(': ') });
+      if (errors.length > 20) entries.push({ at: scan.completedAt || scan.startedAt, level: 'info', message: (errors.length - 20) + ' earlier scan errors omitted from this view.', detail: '' });
+      return entries;
+    });
+    return [...saved, ...activityLog];
+  }
+  function logText() {return logEntries().map(entry => [entry.at,entry.level.toUpperCase(),entry.message + (entry.repeats > 1 ? ' (' + entry.repeats + ' times)' : ''),entry.detail].filter(Boolean).join(' · ')).join('\n');}
+  function renderLog() {$('#log-content').textContent = logText() || 'No activity has been recorded yet.';}
+  function recordScanError(scan, error) {
+    scan.errors.push(error);
+    logActivity('error', 'Scan item could not be read', typeof error === 'string' ? error : [error.path,error.message].filter(Boolean).join(': '));
+  }
+  window.addEventListener('error', event => {if (event.message) logActivity('error','Application error',event.error?.stack || event.message);});
+  window.addEventListener('unhandledrejection', event => {logActivity('error','Operation did not finish',event.reason?.stack || event.reason?.message || event.reason);toast('An operation failed. Open Log for details.', true);});
   function toast(message, error = false) {
+    if (error) logActivity('error', message);
     const t = $('#toast');
     t.textContent = message;
     t.style.borderColor = error ? '#a2434e' : '';
@@ -2862,17 +2892,27 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   function gridQuerySignature() {return JSON.stringify([databaseGeneration, activeBucket, page, pageSize, $('#root-filter').value, $('#search').value, $('#source-filter').checked, $('#preview-filter').checked, $('#sort').value, [...ws.preferences.visibleExtensions]]);}
   async function renderResults(deferInteraction = false, preservePage = deferInteraction && Boolean(scanController)) {
     if (!databaseClient) return;
+    if (reviewWriteInFlight) {deferredGridPreserve = true;scheduleLiveResults();return;}
     if (evidenceOperationInFlight) {deferredGridPreserve ||= preservePage;scheduleLiveResults();return;}
     if (gridQueryBusy) {gridQueryDefer = gridQueryAgain ? gridQueryDefer && deferInteraction : deferInteraction;gridQueryPreserve = gridQueryAgain ? gridQueryPreserve && preservePage : preservePage;gridQueryAgain = true;return gridQueryPromise;}
     gridQueryBusy = true;
     $('#results').setAttribute('aria-busy', 'true');
     if (!deferInteraction) {if (preservePage) $('#result-summary').textContent = 'Updating this page…';else showOperation('Results', 'Loading the selected page and order…');}
-    gridQueryPromise = renderResultsAsync(deferInteraction, preservePage).catch((error) => {if (!/Database changed/.test(error.message)) toast('Could not load results: ' + error.message, true);}).finally(async () => {gridQueryBusy = false;gridQueryPromise = null;$('#results').setAttribute('aria-busy', 'false');$('#results').style.minHeight = '';finishOperation('Results');if (gridQueryAgain) {const defer = gridQueryDefer,preserve = gridQueryPreserve;gridQueryAgain = false;gridQueryDefer = false;gridQueryPreserve = false;await renderResults(defer, preserve);}});
+    gridQueryPromise = renderResultsAsync(deferInteraction, preservePage).catch((error) => {
+      if (/Database changed/.test(error.message)) return;
+      toast('Could not load results: ' + error.message, true);
+      const notice = $('#results .results-loading');
+      if (notice) {
+        notice.textContent = 'The items were saved, but this page could not be loaded. Open Log for details. ';
+        const retry = document.createElement('button');retry.textContent = 'Retry loading';
+        retry.addEventListener('click', () => renderResults(false, true));notice.append(retry);
+      }
+    }).finally(async () => {gridQueryBusy = false;gridQueryPromise = null;$('#results').setAttribute('aria-busy', 'false');$('#results').style.minHeight = '';finishOperation('Results');if (gridQueryAgain) {const defer = gridQueryDefer,preserve = gridQueryPreserve;gridQueryAgain = false;gridQueryDefer = false;gridQueryPreserve = false;await renderResults(defer, preserve);}});
     return gridQueryPromise;
   }
   async function renderResultsAsync(deferInteraction = false, preservePage = false) {
-    const signature = gridQuerySignature(),counts = await readCounts();
-    if (signature !== gridQuerySignature()) {gridQueryAgain = true;return;}
+    const signature = gridQuerySignature(),revision = reviewRevision,counts = await readCounts();
+    if (reviewWriteInFlight || revision !== reviewRevision || signature !== gridQuerySignature()) {gridQueryAgain = true;return;}
     if (activeBucket === 'EVIDENCE' && !vaultKey) {
       for (const { status, total, shown } of counts) {$('#count-' + status).textContent = total;$('#visible-' + status).textContent = status === 'EVIDENCE' ? 'Locked' : 'Showing ' + shown + ' of ' + total;}
       visibleCards = [];await renderEvidenceLocked();return;
@@ -2888,12 +2928,12 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       const incoming = needed ? await queryCardKeysAsync(activeBucket, true, needed, (requestedPage - 1) * pageSize, false, null, retained) : [];
       keys = retainLiveCardKeys(retained, retained, incoming, pageSize);
     } else keys = await queryCardKeysAsync(activeBucket, true, pageSize, (requestedPage - 1) * pageSize);
-    if (signature !== gridQuerySignature()) {gridQueryAgain = true;return;}
+    if (reviewWriteInFlight || revision !== reviewRevision || signature !== gridQuerySignature()) {gridQueryAgain = true;return;}
     if (evidenceOperationInFlight) {scheduleLiveResults();return;}
     if (deferInteraction && (gridPointerActive || Date.now() < interactionUntil || $('#inspect-dialog').open)) {scheduleLiveResults();return;}
     const reuseCards = keepCurrentPage && !deferInteraction,cached = new Map(visibleCards.map(card => [card.key, card]));
     const slice = (await MediaDatabase.arrayMap(keys, async key => reuseCards && cached.get(key) || await cardForKey(key))).filter(Boolean);
-    if (signature !== gridQuerySignature()) {gridQueryAgain = true;return;}
+    if (reviewWriteInFlight || revision !== reviewRevision || signature !== gridQuerySignature()) {gridQueryAgain = true;return;}
     const grid = $('#results');
     const nodes = new Map([...grid.querySelectorAll('.card')].map((node) => [node.dataset.key, node]));
     const prepared = [];
@@ -2908,9 +2948,9 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         prepared.push({ node, card, occurrence: o });
       }
     } catch (error) {for (const { node } of prepared) if (!node.isConnected) disposeCard(node);throw error;}
-    if (signature !== gridQuerySignature() || evidenceOperationInFlight || deferInteraction && (gridPointerActive || Date.now() < interactionUntil || $('#inspect-dialog').open)) {
+    if (reviewWriteInFlight || revision !== reviewRevision || signature !== gridQuerySignature() || evidenceOperationInFlight || deferInteraction && (gridPointerActive || Date.now() < interactionUntil || $('#inspect-dialog').open)) {
       for (const { node } of prepared) if (!node.isConnected) disposeCard(node);
-      if (signature !== gridQuerySignature()) gridQueryAgain = true;else scheduleLiveResults();
+      if (reviewWriteInFlight || revision !== reviewRevision || signature !== gridQuerySignature()) gridQueryAgain = true;else scheduleLiveResults();
       return;
     }
     // Complete database reads before touching the grid. Location updates reuse
@@ -2919,7 +2959,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     if (inspectedKey) inspectIndex = visibleCards.findIndex((card) => card.key === inspectedKey);
     for (const { status, total, shown } of counts) {$('#count-' + status).textContent = total;$('#visible-' + status).textContent = status === 'EVIDENCE' && !vaultKey ? 'Locked' : 'Showing ' + shown + ' of ' + total;}
     grid.style.setProperty('--thumbnail-fit', ws.preferences.thumbnailFit === 'fill' ? 'cover' : 'contain');
-    grid.querySelectorAll('.empty,.evidence-locked').forEach((node) => node.remove());
+    grid.querySelectorAll('.empty,.evidence-locked,.results-loading').forEach((node) => node.remove());
     const wanted = new Set(slice.map((card) => card.key));
     for (const [key, node] of nodes) if (!wanted.has(key)) disposeCard(node);
     for (let index = 0; index < prepared.length; index++) {
@@ -2981,6 +3021,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         catch (error) {
           if (error?.name === 'AbortError') continue;
           failed++;
+          logActivity('warning','Saved preview could not be created',occurrence.path + ': ' + String(error.message || error));
           console.warn('Could not create preview for ' + occurrence.path + ': ' + String(error.message || error));
         }
       }
@@ -2994,17 +3035,17 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   function currentPageKeys() {
     return visibleCards.map((c) => c.key);
   }
-  async function selectCard(key, event, toggleOnly = false) {
+  function selectCard(key, event, toggleOnly = false) {
     const keys = currentPageKeys();
     if (event?.shiftKey) {
-      await MediaDatabase.arrayForEach(C.rangeKeys(keys, lastSelectionAnchor, key), async (k) => await selected.add(k));
+      for (const k of C.rangeKeys(keys, lastSelectionAnchor, key)) selected.add(k);
     } else
     if (event?.ctrlKey || event?.metaKey || toggleOnly) {
-      selected.has(key) ? selected.delete(key) : await selected.add(key);
+      selected.has(key) ? selected.delete(key) : selected.add(key);
     } else
     {
       selected.clear();
-      await selected.add(key);
+      selected.add(key);
     }
     lastSelectionAnchor = key;
     interactionUntil = Date.now() + 600;patchSelection();
@@ -3055,25 +3096,13 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     badge.textContent = (C.mediaKindForExtension(o.extension) === 'video' ? '▶ ' : '') +
     o.extension.toUpperCase();
     thumb.append(badge);
-    let clickTimer = null;article.__dispose = () => clearTimeout(clickTimer);
-    thumb.addEventListener('click', async (e) => {
-      if (e.target.closest('input,button')) return;
-      if (e.shiftKey || e.ctrlKey || e.metaKey) {
-        clearTimeout(clickTimer);
-        await selectCard(card.key, e);
-        return;
-      }
-      clearTimeout(clickTimer);
-      clickTimer = setTimeout(async () => await selectCard(card.key, null), 500);
-    }
-    );
+    thumb.addEventListener('click', (e) => {
+      if (e.target.closest('input,button') || e.detail > 1) return;
+      selectCard(card.key, e);
+    });
     thumb.addEventListener('dblclick', async (e) => {
-      clearTimeout(clickTimer);
-      e.preventDefault();
-      e.stopPropagation();
-      await openInspector(card.key);
-    }
-    );
+      e.preventDefault();e.stopPropagation();await openInspector(card.key);
+    });
     const body = document.createElement('div');
     body.className = 'card-body';
     const name = document.createElement('div');
@@ -3112,6 +3141,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   function renderSelection() {
     $$('.bottom-selection-count').forEach((el) => el.textContent = selected.size + ' selected');
+    $$('[data-bulk],[data-review]').forEach(button => button.disabled = reviewActionInFlight || evidenceOperationInFlight);
     const bar = $('#selectionbar');
     bar.classList.toggle('show', selected.size > 0);
     $('#selection-count').textContent = `${selected.size} selected`;
@@ -3279,7 +3309,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   function renderScanActivity() {
     const background = Boolean(scanController) && !$('#scan-dialog').open,
-      banner = $('#live-scan-banner'),busy = Boolean(scanController) || evidenceOperationInFlight;
+      banner = $('#live-scan-banner'),busy = Boolean(scanController) || evidenceOperationInFlight || reviewActionInFlight;
     banner.classList.toggle('hidden', !background);
     $('#scan-button').disabled = busy;
     $('#new-workspace').disabled = busy;
@@ -3641,7 +3671,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
             await journal.finish(job.seq, checkpoint?.state === 'failed' || scan.errors.length > beforeErrors ? 'failed' : checkpoint || scanConfig.scanArchives && entry.name.toLowerCase().endsWith('.zip') ? 'complete' : 'skipped', checkpoint?.occurrenceId || null, checkpoint?.error || null);
             if (checkpoint?.state === 'failed') errors.push({ path: job.path, message: checkpoint.error });
           } catch (error) {
-            await journal.finish(job.seq, controller.cancelled ? 'pending' : 'failed', null, String(error.message || error));
+            const committed = (await db.exec('SELECT state FROM scan_jobs WHERE scan_id=? AND seq=?', [scan.id, job.seq]))[0]?.values[0][0] === 'complete';
+            if (!committed) await journal.finish(job.seq, controller.cancelled ? 'pending' : 'failed', null, String(error.message || error));
             if (!controller.cancelled) errors.push({ path: job.path, message: String(error.message || error) });
           }
           await setDirty();continue;
@@ -3860,6 +3891,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     };
 
     scanController = controller;
+    scan.stopReason = '';scan.stopKind = '';
+    logActivity('info', resumeScan ? 'Scan resumed' : 'Scan started', ws.roots[rootId]?.label || rootId);
     renderResumeScan();
     setScanUiState('scanning');
     renderRoots();
@@ -3904,7 +3937,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         }
         catch (error) {
           if (controller.cancelled) return;
-          scan.errors.push({
+          recordScanError(scan, {
             path: rel, message: String(error.message || error)
           }
           );
@@ -3941,7 +3974,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
             }
             catch (error) {
               if (error?.name === 'AbortError') return;
-              scan.previewErrors++;
+              scan.previewErrors++;logActivity('warning','Saved preview could not be created',rel + ': ' + String(error.message || error));
             }
           }
           return;
@@ -3968,7 +4001,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         }
         catch (error) {
           if (controller.cancelled) return;
-          scan.errors.push({
+          recordScanError(scan, {
             path: rel, message: String(error.message || error)
           }
           );
@@ -3989,7 +4022,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
               if (match) {hash = match.decision.hash;hashMethod = 'sha256';useQuick = false;}
             } catch (error) {
               if (controller.cancelled) return;(await checkpoints[rel]).state = 'failed';(await checkpoints[rel]).error = String(error.message || error);
-              scan.errors.push({ path: rel, message: (await checkpoints[rel]).error });await setDirty();return;
+              recordScanError(scan, { path: rel, message: (await checkpoints[rel]).error });await setDirty();return;
             }
           }
         }
@@ -4024,7 +4057,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
               }
               catch (error) {
                 if (controller.cancelled) return;
-                scan.errors.push({ path: rel, message: String(error?.message || error) });
+                recordScanError(scan, { path: rel, message: String(error?.message || error) });
                 (await checkpoints[rel]).state = 'failed';
                 await setDirty();
                 return;
@@ -4046,10 +4079,10 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           if (controller.cancelled) return;
           if (current.size !== file.size || current.lastModified !== file.lastModified) {
             (await checkpoints[rel]).state = 'failed';(await checkpoints[rel]).error = 'Source changed during scan';
-            scan.errors.push({ path: rel, message: 'Source changed during scan' });await setDirty();return;
+            recordScanError(scan, { path: rel, message: 'Source changed during scan' });await setDirty();return;
           }
         }
-        await db.run('BEGIN');
+        await db.run('BEGIN');const mediaTransaction = db.transaction;let mediaCommitted = false;
         try {
           if (supersedePrevious) previous.supersededAt = new Date().toISOString();
           const key = rootId + '|' + hash,existingDecision = await ws.decisions[key],evidenceDecision =
@@ -4069,7 +4102,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
             if (await ws.contents[evidenceDecision.hash]) {
               (await ws.contents[evidenceDecision.hash]).lastSeen = seenAt;
             }
-            await entry.commitJob?.(protectedOccurrence?.id || null);await db.run('COMMIT');
+            await entry.commitJob?.(protectedOccurrence?.id || null);await db.run('COMMIT');mediaCommitted = true;
             scan.previouslyReviewed++;
             scan.hashed++;scan.committedTotal = (scan.committedTotal || 0) + 1;
             useQuick ? scan.quickHashed++ : scan.fullHashed++;
@@ -4117,7 +4150,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
             state: 'complete', signature, occurrenceId: occId, updatedAt: seenAt
           };
 
-          await entry.commitJob?.(occId);await db.run('COMMIT');
+          await entry.commitJob?.(occId);await db.run('COMMIT');mediaCommitted = true;
           rememberScanSource(occId, rootId, entry.source || file);
           scan.hashed++;scan.committedTotal = (scan.committedTotal || 0) + 1;
           useQuick ? scan.quickHashed++ : scan.fullHashed++;
@@ -4143,14 +4176,15 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
             }
             catch (error) {
               if (error?.name === 'AbortError') return;
-              scan.previewErrors++;
+              scan.previewErrors++;logActivity('warning','Saved preview could not be created',rel + ': ' + String(error.message || error));
               await setDirty();
             }
           }
         } catch (error) {
-          try {await db.run('ROLLBACK');} catch (_) {}
+          if (mediaCommitted) throw error;
+          if (db.transaction === mediaTransaction) try {await db.run('ROLLBACK');} catch (_) {}
           await installCatalog(ws);checkpoints[rel] = { state: 'failed', signature, error: String(error.message || error), updatedAt: new Date().toISOString() };
-          scan.errors.push({ path: rel, message: String(error.message || error) });await setDirty();
+          recordScanError(scan, { path: rel, message: String(error.message || error) });await setDirty();
         }
       };
 
@@ -4159,7 +4193,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         await runJournalScan(options.rootHandle, scan, scanConfig, async (entry) => await processEntry(entry), controller) :
         await entries(async (entry) => await processEntry(entry), controller);
         const seenErrors = new Set(scan.errors.map((error) => error.path + '\0' + error.message));
-        for (const error of listing.errors) {const id = error.path + '\0' + error.message;if (!seenErrors.has(id)) {scan.errors.push(error);await seenErrors.add(id);}}
+        for (const error of listing.errors) {const id = error.path + '\0' + error.message;if (!seenErrors.has(id)) {recordScanError(scan, error);await seenErrors.add(id);}}
         scan.enumerationCancelled = listing.cancelled;
         scan.enumerationCoverage = listing.errors.length || listing.cancelled ? 'partial' : 'complete';
       } else
@@ -4171,6 +4205,9 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       }
       scan.completedAt = new Date().toISOString();
       scan.completed = !controller.cancelled && !scan.errors.length;
+      scan.stopKind = scan.completed ? 'complete' : controller.cancelled ? 'cancelled' : 'error';
+      scan.stopReason = scan.completed ? 'Scan completed' : controller.cancelled ? 'Scan cancelled by request' : 'Scan finished with ' + scan.errors.length + ' read errors; resume to retry failed items.';
+      logActivity(scan.stopKind === 'error' ? 'error' : 'info',scan.stopReason,ws.roots[rootId]?.label || '');
       const readyCount = scan.committedTotal ?? scan.hashed + (scan.resumeSkipped || 0);
       $('#scan-progress').style.width =
       `${scan.completed ? 100 : readyCount / Math.max(1, scan.imageCandidates) * 100}%`;
@@ -4222,8 +4259,10 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       }
     }
     catch (e) {
-      scan.errors.push(String(e.message || e));
+      recordScanError(scan, String(e.message || e));
       scan.completedAt = new Date().toISOString();
+      scan.stopKind = 'error';scan.stopReason = 'Scan stopped: ' + String(e.message || e);
+      logActivity('error',scan.stopReason);
       setScanUiState('error', {
         message: 'Scan stopped: ' + e.message
       }
@@ -4245,7 +4284,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         }
         catch (error) {
           autoSaveError = String(error?.message || error);
-          toast('Scan ended, but the database could not be saved.', true);
+          toast('Scan ended, but the database could not be saved: ' + autoSaveError, true);
           scheduleAutoSave();
         }
       } else
@@ -4256,43 +4295,59 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       await renderResults();
     }
   }
+  async function runReviewAction(keys, status, notes) {
+    if (reviewActionInFlight || !keys.length) return;
+    reviewActionInFlight = true;renderSelection();renderScanActivity();
+    showOperation('Review', 'Saving selected items…');
+    try {
+      if (status === 'EVIDENCE') await captureEvidence(keys);
+      else if (activeBucket === 'EVIDENCE') await reassignEvidence(keys, status, notes);
+      else await assign(keys, status, notes);
+    } catch (error) {toast('Review action failed: ' + String(error.message || error), true);}
+    finally {reviewActionInFlight = false;renderSelection();renderScanActivity();finishOperation('Review');}
+  }
+  function showResultsLoading() {
+    const grid = $('#results');grid.style.minHeight = '';
+    grid.querySelectorAll('.empty,.results-loading').forEach(node => node.remove());
+    const notice = document.createElement('div');notice.className = 'notice results-loading';
+    notice.setAttribute('role','status');notice.textContent = 'Loading items to fill this page…';grid.prepend(notice);
+    // Removing a long page can leave the reader below the remaining cards.
+    const box = grid.getBoundingClientRect();
+    if (box.bottom < 0 || !visibleCards.length && box.top < 0) grid.scrollIntoView({block:'start'});
+  }
   async function assign(keys, status, notes) {
-    if (evidenceOperationInFlight) {
-      toast('Wait for the active Evidence operation to finish.', true);
-      return;
-    }
-    await db.idle();
+    if (evidenceOperationInFlight) {toast('Wait for the active Evidence operation to finish.', true);return;}
+    const database = db,workspace = ws,eventCount = ws.events.length;
     const bulkId = keys.length > 1 ? C.cryptoRandom() : null,now = new Date().toISOString();
-    const eventCount=ws.events.length;await db.run('BEGIN');
-    try{
-    await MediaDatabase.arrayForEach(keys, async (key) => {
-      const d = await ws.decisions[key];
-      if (!d) return;
-      const previous = d.status;
-      d.status = status;
-      d.reviewedAt = now;
-      d.reviewer = ws.reviewer || '';
-      if (notes !== undefined) d.notes = notes;
-      ws.events.push({
-        id: C.cryptoRandom(), decisionKey: key, previousStatus: previous,
-        newStatus: status, at: now, reviewer: ws.reviewer || '', notes: d.notes || '',
-        bulkId
+    let transaction = null,committed = false;
+    reviewWriteInFlight = true;reviewRevision++;
+    try {
+      await database.run('BEGIN');transaction = database.transaction;
+      if (database !== db || workspace !== ws) throw new Error('Database changed before the review action.');
+      for (const key of keys) {
+        const d = await ws.decisions[key];if (!d) throw new Error('Selected item is no longer in this database.');
+        const previous = d.status;d.status = status;d.reviewedAt = now;d.reviewer = ws.reviewer || '';
+        if (notes !== undefined) d.notes = notes;
+        ws.events.push({ id:C.cryptoRandom(),decisionKey:key,previousStatus:previous,newStatus:status,at:now,reviewer:ws.reviewer || '',notes:d.notes || '',bulkId });
       }
-      );
-    }
-    );
-    await db.run('COMMIT');
-    }catch(error){try{await db.run('ROLLBACK');}catch(_){}ws.events.length=eventCount;await installCatalog(ws);toast('Review changes could not be saved: '+error.message,true);return;}
-    selected.clear();
+      await database.run('COMMIT');committed = true;
+    } catch (error) {
+      // A failed COMMIT may already have rolled back; never roll back another operation.
+      if (transaction && database.transaction === transaction) try {await database.run('ROLLBACK');} catch (_) {}
+      if (database === db && workspace === ws) {ws.events.length = eventCount;await database.idle();await installCatalog(ws);}
+      toast('Review changes could not be saved: ' + String(error.message || error), true);
+    } finally {reviewWriteInFlight = false;reviewRevision++;}
+    if (!committed) {await renderResults();return;}
+    for (const key of keys) selected.delete(key);
     if (status !== activeBucket) {
-      const removed = new Set(keys),grid = $('#results');grid.style.minHeight = grid.getBoundingClientRect().height + 'px';
+      const removed = new Set(keys),grid = $('#results');
       for (const node of grid.querySelectorAll('.card')) if (removed.has(node.dataset.key)) disposeCard(node);
       visibleCards = visibleCards.filter(card => !removed.has(card.key));
       if ($('#inspect-dialog').open) inspectIndex = Math.min(inspectIndex, Math.max(0, visibleCards.length - 1));
-      patchSelection();
+      showResultsLoading();patchSelection();
     }
-    await setDirty();
-    await renderResults(false, true);
+    logActivity('info',keys.length + ' item' + (keys.length === 1 ? '' : 's') + ' moved to ' + ({TO_REVIEW:'To review',COMPLIANT:'Compliant',NON_COMPLIANT:'Non-compliant',EVIDENCE:'Evidence'}[status] || status));
+    await setDirty();await renderResults(false, true);
     if ($('#inspect-dialog').open && inspectIndex >= 0) await renderInspector();
   }
   async function verifyInspectorFullHash() {
@@ -5444,19 +5499,14 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   b.dataset.action)));
   $$('[data-bulk]').forEach((b) => b.addEventListener('click', async () => {
     const keys = [...selected],status = b.dataset.bulk;
-    if (status === 'EVIDENCE') await captureEvidence(keys);else
-    if (activeBucket === 'EVIDENCE') await reassignEvidence(keys, status);else
-    await assign(keys, status);
+    await runReviewAction(keys, status);
   }
   ));
   $$('[data-review]').forEach((b) => b.addEventListener('click', async () => {
     const c = visibleCards[inspectIndex];
     if (!c) return;
     const status = b.dataset.review,notes = $('#review-notes').value;
-    if (status === 'EVIDENCE') await captureEvidence([c.key]);else
-    if (c.decision.status === 'EVIDENCE') await reassignEvidence([c.key],
-    status, notes);else
-    await assign([c.key], status, notes);
+    await runReviewAction([c.key], status, notes);
   }
   ));
   $('#scan-button').addEventListener('click', async () => {
@@ -5844,6 +5894,11 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   );
   $('#about-button').addEventListener('click', () => $('#about-dialog').showModal());
   $('#help-button').addEventListener('click', () => $('#help-dialog').showModal());
+  $('#log-button').addEventListener('click', () => {renderLog();$('#log-dialog').showModal();});
+  $('#save-log').addEventListener('click', () => {
+    const url = URL.createObjectURL(new Blob([logText()],{type:'text/plain;charset=utf-8'})),link = document.createElement('a');
+    link.href = url;link.download = 'media-reviewer-log-' + new Date().toISOString().slice(0,10) + '.txt';link.click();setTimeout(() => URL.revokeObjectURL(url),1000);
+  });
   $('#export-report').addEventListener('click', exportReport);
   $$('#export-evidence,[data-export-evidence]').forEach((button) => button.addEventListener('click', async () => await prepareEvidenceExport([...selected])));
   $('#evidence-export-start').addEventListener('click', async () => await

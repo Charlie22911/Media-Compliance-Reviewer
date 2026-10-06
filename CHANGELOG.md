@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.2.5 — October 6, 2026
+
+- Fit shows the full image within the thumbnail frame; Fill crops around the center.
+- Select thumbnails immediately, prevent overlapping review actions, and avoid rendering uncommitted decisions during page refreshes.
+- Show compact loading feedback after moving items without retaining the previous page height.
+- Add Log for recent activity, errors, saved scan stop reasons, and text export.
+- Prevent media cleanup after a committed record from rolling back another operation.
+
 ## 3.2.4 — October 6, 2026
 
 - Use stable Found order by default and add Reset view to clear sorting and filters.
