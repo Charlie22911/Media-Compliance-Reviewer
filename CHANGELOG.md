@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.3.0 — October 6, 2026
+
+- Add configurable parallel file workers under Scan speed: default 4, adjustable from 1 to 8.
+- Prepare file reads, fingerprints, and common-image thumbnails concurrently, then publish results in discovery order.
+- Bound pending file preparation to the selected worker count; keep database publication and heavier preview decoders coordinated.
+- Preserve cancellation, retries, saved worker settings, and resume checkpoints with parallel preparation.
+
 ## 3.2.6 — October 6, 2026
 
 - Keep folder traversal within the Forge iterator limit, including deep folder trees.

@@ -50,6 +50,12 @@ The browser keeps a working copy locally. That storage is not a backup and may b
 
 Allow enough disk space for the working copy and saved snapshots. Saved previews increase the database's size as the collection grows. Evidence capture checks the estimated total database size before adding an encrypted original. The default threshold is **2.5 GB**. To raise it, open **Maintenance → Database size limit for Evidence** and choose **5 GB**, then save the database. The choice is kept with that database. Normal scans can continue beyond this threshold while browser storage is available; existing records and previews are kept. Browser storage availability can impose a lower limit. Opening and saving large databases can take time; watch the progress indicators.
 
+## Scan speed
+
+Choose **Scan speed → Parallel file workers** before starting or resuming a scan. The default is **4**, with **1–8** available. File reads, fingerprints, and common-image thumbnails run concurrently; results are saved in discovery order. The selected worker count is saved with the database.
+
+Start with 4. Fewer workers can help when memory or a network connection is limited; more may help on fast storage. Pending file preparation is bounded by the selected worker count. Database publication, heavier video and specialist-format preview decoding, and media within each ZIP archive remain coordinated. Storage, decoding, and database write speed can limit the benefit, so additional workers do not guarantee a proportional speed increase. Cancellation returns unpublished file jobs to the resume queue.
+
 ## Activity log and review feedback
 
 Recoverable folder reads, file reads, fingerprinting, and database operations receive an initial attempt plus up to three retries with short pauses. Retry attempts appear in **Log**, and cancellation remains available while waiting. A failed folder listing is reopened; saved checkpoints prevent completed files from being processed again. Database batches are replayed only when rollback has confirmed a safe outcome, and automatic saves wait for scan transactions. Permanent problems such as invalid data or exhausted storage require a different action. If a worker failure leaves a write unconfirmed, reopen the last saved database before continuing.

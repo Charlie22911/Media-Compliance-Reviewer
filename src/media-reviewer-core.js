@@ -77,6 +77,7 @@
   const rootKindFromName = (name) => String(name || '').trim().toLowerCase() ===
   'homeshare' ? 'homeshare' : 'standard';
   const normalizeScanMode = (mode) => ['quick', 'deep', 'custom'].includes(mode) ? mode : 'custom';
+  const normalizeWorkerCount = value => Number.isFinite(Number(value)) && Number(value) >= 1 ? Math.min(8, Math.floor(Number(value))) : 4;
   const normalizeQuickVideoThresholdMiB = (value) => {
     const number = Number(value);
     return Number.isFinite(number) && number >= .25 ? Math.min(number, 102400) : 1;
@@ -97,7 +98,7 @@
       cutoffMs = Date.UTC(year, month, day, now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds(), now.getUTCMilliseconds());
     }
     return {
-      version: 2, mode: normalizedMode, extensions: new Set(extensions),
+      version: 2, mode: normalizedMode, extensions: new Set(extensions), workerCount: normalizeWorkerCount(hashOptions.workerCount),
       excludeUserApplicationData: hashOptions.excludeUserApplicationData !== false, skipOlderYears: years, cutoffMs, ageBasis: 'lastModified',
       rootKind: rootKindFromName(rootName), scanArchives: Boolean(scanArchives),
       quickVideoHash: hashOptions.quickVideoHash !== false,
@@ -921,7 +922,7 @@
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.6', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.0', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -936,7 +937,7 @@
       },
       events: [], maintenanceEvents: [], preferences: {
         scanExtensions: new Set(ALL_EXTENSIONS), visibleExtensions: new Set(ALL_EXTENSIONS),
-        scanMode: 'deep', scanArchives: false, excludeUserApplicationData: true, skipOlderYears: 0, quickVideoHash: true,
+        scanMode: 'deep', scanArchives: false, workerCount: 4, excludeUserApplicationData: true, skipOlderYears: 0, quickVideoHash: true,
         quickVideoThresholdMiB: 1, thumbSize: 210, thumbnailFit: 'fit', itemsPerPage: 60,
         evidenceDatabaseLimitGb: 2.5
       }
@@ -949,7 +950,7 @@
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.2.6', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.3.0', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -964,6 +965,7 @@
     ALL_EXTENSIONS);
     obj.preferences.scanMode = normalizeScanMode(obj.preferences.scanMode || 'custom');
     obj.preferences.scanArchives = Boolean(obj.preferences.scanArchives);
+    obj.preferences.workerCount = normalizeWorkerCount(obj.preferences.workerCount);
     obj.preferences.excludeUserApplicationData = obj.preferences.excludeUserApplicationData !== false;
     obj.preferences.skipOlderYears = Number(obj.preferences.skipOlderYears) || 0;
     obj.preferences.quickVideoHash = obj.preferences.quickVideoHash !== false;
@@ -1170,7 +1172,7 @@
     STATUSES, SQL_STATEMENTS, reportStatuses, extensionOf, shouldProcessName, matchingOccurrences,
     isContentVisible,
     rangeKeys, fileUrlFromPath, latestScanExtensions, normalizeSourceRoot, rootKindFromName,
-    normalizeScanMode, createScanConfig, shouldUseQuickHash, quickHashRanges,
+    normalizeScanMode, normalizeWorkerCount, createScanConfig, shouldUseQuickHash, quickHashRanges,
     quickHashIdentity, shouldSkipAge, homeShareUser, shouldSkipPathForScan, fitPathSuffix,
     resumeFileMatches, latestIncompleteScan, abandonIncompleteScans, compareOccurrences,
     resolveRelativeFile, retryOperation, retryableError, retryDelay, zipCrc32, workspaceFileVersionsMatch, diffRowSnapshots,

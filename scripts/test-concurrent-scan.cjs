@@ -7,7 +7,7 @@ vm.createContext(context);
 vm.runInContext(fs.readFileSync(path.join(sourceRoot, 'src/media-reviewer-core.js'), 'utf8'), context);
 context.C = context.ImageReviewerCore;
 const app = fs.readFileSync(path.join(sourceRoot, 'src/media-reviewer-app.js'), 'utf8');
-for (const name of ['hashFile', 'boundedScanRead', 'scanRetry', 'runJournalScan']) {
+for (const name of ['hashFile', 'boundedScanRead', 'scanRetry', 'createScanQueue', 'runPreparedEntries', 'runJournalScan']) {
   const code = new RegExp('(?:async )?function ' + name + '\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}').exec(app);
   assert(code, name); vm.runInContext(code[0], context);
 }
@@ -47,6 +47,33 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     paths.push(entry.relativePath);
     context.ws.scanCheckpoints.scan[entry.relativePath] = { state: 'complete', occurrenceId: entry.relativePath };
     await entry.commitJob(entry.relativePath);
+  }
+  {
+    const busy=new Set(),paths=[];let calls=0,errors=0;
+    const controller={cancelled:false,async prepareEntry(entry,slot){if(++calls===2)throw Error('Temporary checkpoint failure');assert(!busy.has(slot),'A failed preparation must not advance into an occupied worker');busy.add(slot);return{promise:new Promise(resolve=>setTimeout(()=>{busy.delete(slot);resolve();},30))};}};
+    await context.runPreparedEntries(async accept=>{for(const name of ['a','b','c'])try{await accept({name});}catch(_){errors++;}},async entry=>{await entry.preparation.promise;paths.push(entry.name);},controller,2);
+    assert.equal(errors,1);assert.deepEqual(paths,['a','c']);assert.equal(busy.size,0);
+  }
+  {
+    const { sqlite, scan, stats } = fresh(), paths = [], ready = [];let active = 0, maximum = 0, started = 0;
+    const controller = { cancelled: false, async prepareEntry(entry, slot) {
+      const index = started++;active++;maximum = Math.max(maximum, active);
+      return { slot, promise: new Promise(resolve => setTimeout(() => {active--;ready.push(index);resolve({ index });}, index === 0 ? 90 : 10)) };
+    }};
+    const root = directory('parallel', Array.from({ length: 12 }, (_, i) => photo(i + '.jpg')), stats);
+    await context.runJournalScan(root, scan, {...config, workerCount: 4}, async entry => {
+      assert(started >= 4, 'Four files are prepared in parallel before the first publication');await entry.preparation.promise;await consume(entry, paths);
+    }, controller);
+    assert.equal(maximum, 4);assert(ready[0] !== 0, 'Preparation can finish out of order');assert.deepEqual(paths, Array.from({length:12},(_,i)=>i+'.jpg'),'Publication stays in discovery order');sqlite.close();
+  }
+  {
+    const {sqlite,scan,stats}=fresh(),paths=[],controller={cancelled:false,async prepareEntry(entry,slot){return{slot,promise:Promise.resolve({})};}};
+    const root=directory('cancel-parallel',Array.from({length:12},(_,i)=>photo(i+'.jpg')),stats);
+    await context.runJournalScan(root,scan,{...config,workerCount:4},async entry=>{await consume(entry,paths);if(paths.length===2)controller.cancelled=true;},controller);
+    assert.equal(sqlite.exec("SELECT count(*) FROM scan_jobs WHERE kind='file' AND state='processing'")[0].values[0][0],0,'Cancellation returns queued files to pending');
+    controller.cancelled=false;
+    await context.runJournalScan(root,scan,{...config,workerCount:4},entry=>consume(entry,paths),controller);
+    assert.deepEqual(paths,Array.from({length:12},(_,i)=>i+'.jpg'),'Resume appends queued files once, in discovery order');sqlite.close();
   }
   {
     const { sqlite, scan, stats } = fresh(), paths = [], media = photo('cleanup.jpg');let releases = 0;

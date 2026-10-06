@@ -2668,6 +2668,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     }
     renderTypeChecks($('#scan-types'), ws.preferences.scanExtensions, 'scan');
     $('#scan-archives').checked = ws.preferences.scanArchives;
+    $('#scan-worker-count').value = C.normalizeWorkerCount(ws.preferences.workerCount);
     $('#quick-video-hash').checked = ws.preferences.quickVideoHash;
     $('#quick-video-threshold').value = ws.preferences.quickVideoThresholdMiB;
     $('#quick-video-threshold').disabled = !ws.preferences.quickVideoHash;
@@ -2694,7 +2695,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       excludeUserApplicationData: saved?.excludeUserApplicationData ?? ws.preferences.excludeUserApplicationData,
       skipOlderYears: saved?.skipOlderYears ?? ws.preferences.skipOlderYears, cutoffMs: saved?.cutoffMs,
       quickVideoHash: ws.preferences.quickVideoHash,
-      quickVideoThresholdMiB: ws.preferences.quickVideoThresholdMiB
+      quickVideoThresholdMiB: ws.preferences.quickVideoThresholdMiB,
+      workerCount: ws.preferences.workerCount
     });
   }
   function fitPathElement(element) {
@@ -3263,6 +3265,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   async function renderAll(preservePage = false) {
     pageSize = C.normalizePageSize(ws.preferences.itemsPerPage);
+    $('#scan-worker-count').value = C.normalizeWorkerCount(ws.preferences.workerCount);
     $('#items-per-page').value = pageSize;
     document.documentElement.style.setProperty('--thumb', ws.preferences.thumbSize +
     'px');
@@ -3316,8 +3319,10 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     $('#resume-scan-status').textContent =
     `${root.label}: ${mode} scan stopped after ${count} image${count === 1 ? '' : 's'}.`;
   }
-  function workerClient() {
-    const source = $('#worker-source').textContent,url = URL.createObjectURL(new Blob([source],
+  function workerClient(scanLane = false) {
+    let source = $('#worker-source').textContent;
+    if (scanLane) source += '\nconst scanHashMessage=self.onmessage;\n' + $('#testable-core').textContent + '\n' + $('#preview-worker-source').textContent + '\nconst scanPreviewMessage=self.onmessage;self.onmessage=e=>e.data.type==="scan-preview"?scanPreviewMessage(e):scanHashMessage(e);';
+    const url = URL.createObjectURL(new Blob([source],
       {
         type: 'text/javascript'
       }
@@ -3327,7 +3332,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   function hashFile(controller, file, jobId, onProgress, request = {}) {
     if (controller.cancelled) return Promise.reject(new DOMException('Scan cancelled', 'AbortError'));
-    const generation = databaseGeneration,worker = controller.worker;
+    const generation = databaseGeneration,worker = controller.worker ||= workerClient(Boolean(controller.scanLane));
     return new Promise(async (resolve, reject) => {
       let settled = false,timer;
       const finish = (fn, value) => {
@@ -3336,10 +3341,10 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         worker.removeEventListener('error', failure);worker.removeEventListener('messageerror', failure);
         controller.cancelCurrent = null;fn(value);
       };
-      const failure = async (e) => {worker.terminate();await finish(reject, new Error(e.message || 'Hash worker failed.'));if (!controller.cancelled && generation === databaseGeneration && controller.worker === worker) controller.worker = workerClient();};
+      const failure = async (e) => {worker.terminate();await finish(reject, new Error(e.message || 'Hash worker failed.'));if (!controller.cancelled && generation === databaseGeneration && controller.worker === worker) controller.worker = workerClient(Boolean(controller.scanLane));};
       const reset = () => {clearTimeout(timer);timer = setTimeout(async () => {
           worker.terminate();await finish(reject, new Error('Hash read timed out without progress.'));
-          if (!controller.cancelled) controller.worker = workerClient();
+          if (!controller.cancelled) controller.worker = workerClient(Boolean(controller.scanLane));
         }, 60000);};
       const handler = async (e) => {
         const m = e.data;if (m.jobId !== jobId) return;
@@ -3358,6 +3363,39 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       worker.addEventListener('message', handler);worker.addEventListener('error', failure);worker.addEventListener('messageerror', failure);
       reset();try {worker.postMessage({ ...request, type: request.type || 'hash', jobId, file });} catch (error) {await failure(error);}
     });
+  }
+  function scanImagePreview(file, controller) {
+    if (controller.cancelled) return Promise.reject(previewAbortError());
+    const worker = controller.worker ||= workerClient(true),jobId = C.cryptoRandom(),generation = databaseGeneration;
+    return new Promise((resolve,reject) => {
+      let settled = false;
+      const finish = (error,result) => {
+        if (settled) return;settled = true;clearTimeout(timer);clearInterval(cancelTimer);
+        worker.removeEventListener('message',message);worker.removeEventListener('error',failure);worker.removeEventListener('messageerror',failure);controller.cancelCurrent = null;
+        if (error) reject(error);else resolve(result);
+      };
+      const stop = error => {worker.terminate();if(controller.worker === worker)controller.worker = null;finish(error);};
+      const failure = event => stop(new Error(event.message || 'Preview worker failed.'));
+      const message = event => {const value=event.data;if(value.jobId!==jobId)return;if(controller.cancelled||generation!==databaseGeneration){stop(previewAbortError());return;}finish(value.error?new Error(value.error):null,value.result);};
+      const timer = setTimeout(()=>stop(new Error('Preview timed out; decoding worker was stopped.')),15000),cancelTimer=setInterval(()=>{if(controller.cancelled||generation!==databaseGeneration)stop(previewAbortError());},100);
+      controller.cancelCurrent = () => stop(previewAbortError());
+      worker.addEventListener('message',message);worker.addEventListener('error',failure);worker.addEventListener('messageerror',failure);
+      try {worker.postMessage({type:'scan-preview',file,extension:C.extensionOf(file.name),purpose:'thumbnail',jobId,generation});}catch(error){stop(error);}
+    });
+  }
+  function createScanQueue(controller, consume, workerCount) {
+    const pending = [],limit = controller.prepareEntry ? C.normalizeWorkerCount(workerCount) : 1;let sequence = 0;
+    return {
+      pending,limit,
+      async add(entry) {if(controller.cancelled)return;entry.preparation = await controller.prepareEntry?.(entry,sequence % limit);sequence++;pending.push(entry);},
+      async drain() {const entry=pending.shift();if(!entry)return;controller.activeLane=entry.preparation?.controller;try{await consume(entry);}finally{entry.preparation=null;controller.activeLane=null;}},
+      async finish() {while(pending.length&&!controller.cancelled)await this.drain();}
+    };
+  }
+  async function runPreparedEntries(produce, consume, controller, workerCount) {
+    const queue=createScanQueue(controller,consume,workerCount);
+    try {const result=await produce(async entry=>{await queue.add(entry);if(queue.pending.length>=queue.limit)await queue.drain();});await queue.finish();return result;}
+    finally {controller.cancelPreparations?.();await Promise.all(queue.pending.map(entry=>entry.preparation?.promise));queue.pending.length=0;}
   }
   function relativePathOf(file) {
     const raw = normalizePath(file.webkitRelativePath || file.name),parts = raw.split('/');
@@ -3424,6 +3462,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     $('#scan-root-choice').disabled = profileLocked || Boolean(pendingResumeScanId);
     $('#video-hash-panel').disabled = profileLocked;
     $('#scan-archives').disabled = profileLocked;
+    $('#scan-worker-count').disabled = profileLocked;
     $('#scan-policy').disabled = profileLocked;
     $$('#scan-options button,#scan-options input').forEach((control) => {
       control.disabled = profileLocked;
@@ -3634,10 +3673,30 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       }
       await setDirty();
     };
+    const queue = createScanQueue(controller, async entry => {
+      const job = entry.scanJob;
+      try {
+        const beforeErrors = scan.errors.length;
+        await emitEntryOrArchive(entry, onEntry, scanConfig, controller);
+        if (controller.cancelled) {const completed = (await db.exec('SELECT state FROM scan_jobs WHERE scan_id=? AND seq=?', [scan.id, job.seq]))[0]?.values[0][0] === 'complete';if (!completed) await journal.finish(job.seq, 'pending');return;}
+        const checkpoint = await ws.scanCheckpoints[scan.id]?.[job.path];
+        await journal.finish(job.seq, checkpoint?.state === 'failed' || scan.errors.length > beforeErrors ? 'failed' : checkpoint || scanConfig.scanArchives && entry.name.toLowerCase().endsWith('.zip') ? 'complete' : 'skipped', checkpoint?.occurrenceId || null, checkpoint?.error || null);
+        if (checkpoint?.state === 'failed') errors.push({ path: job.path, message: checkpoint.error });
+      } catch (error) {
+        const committed = (await db.exec('SELECT state FROM scan_jobs WHERE scan_id=? AND seq=?', [scan.id, job.seq]))[0]?.values[0][0] === 'complete';
+        if (!committed) await journal.finish(job.seq, controller.cancelled ? 'pending' : 'failed', null, String(error.message || error));
+        if (!controller.cancelled) errors.push({ path: job.path, message: String(error.message || error) });
+      }
+    },scanConfig.workerCount);
     try {
       while (!controller.cancelled) {
         if (discovery?.settled) await publishBatch();
-        const fileJob = await journal.next('file');
+        let fileJob = await journal.next('file');
+        while (fileJob && queue.pending.length < queue.limit && !controller.cancelled) {
+          const job = fileJob;await journal.start(job.seq);
+          await queue.add({ name:job.path.split('/').at(-1),relativePath:job.path,scanJob:job,getFile:async()=>await C.resolveRelativeFile(rootHandle,job.path),commitJob:async occurrenceId=>await journal.finish(job.seq,'complete',occurrenceId) });
+          fileJob = await journal.next('file');
+        }
         if (!discovery) {
           const room = MAX_PENDING_FILES - await journal.pendingCount('file', MAX_PENDING_FILES);
           // Wait for a full batch of capacity instead of resuming discovery for
@@ -3669,22 +3728,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           }
         }
         if (controller.cancelled) break;
-        if (fileJob) {
-          const job = fileJob;
-          await journal.start(job.seq);await setDirty();
-          try {
-            const entry = { name: job.path.split('/').at(-1), relativePath: job.path, getFile: async () => await C.resolveRelativeFile(rootHandle, job.path), commitJob: async (occurrenceId) => await journal.finish(job.seq, 'complete', occurrenceId) };
-            const beforeErrors = scan.errors.length;
-            await emitEntryOrArchive(entry, onEntry, scanConfig, controller);
-            if (controller.cancelled) {const completed = (await db.exec('SELECT state FROM scan_jobs WHERE scan_id=? AND seq=?', [scan.id, job.seq]))[0]?.values[0][0] === 'complete';if (!completed) await journal.finish(job.seq, 'pending');break;}
-            const checkpoint = await ws.scanCheckpoints[scan.id]?.[job.path];
-            await journal.finish(job.seq, checkpoint?.state === 'failed' || scan.errors.length > beforeErrors ? 'failed' : checkpoint || scanConfig.scanArchives && entry.name.toLowerCase().endsWith('.zip') ? 'complete' : 'skipped', checkpoint?.occurrenceId || null, checkpoint?.error || null);
-            if (checkpoint?.state === 'failed') errors.push({ path: job.path, message: checkpoint.error });
-          } catch (error) {
-            const committed = (await db.exec('SELECT state FROM scan_jobs WHERE scan_id=? AND seq=?', [scan.id, job.seq]))[0]?.values[0][0] === 'complete';
-            if (!committed) await journal.finish(job.seq, controller.cancelled ? 'pending' : 'failed', null, String(error.message || error));
-            if (!controller.cancelled) errors.push({ path: job.path, message: String(error.message || error) });
-          }
+        if (queue.pending.length) {
+          await queue.drain();
           await setDirty();continue;
         }
         if (!discovery) break;
@@ -3695,6 +3740,10 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       // Drain any pending read before closing its iterator and releasing handles.
       // Unpublished paths are rediscovered from this pending folder on resume.
       closing = true;
+      controller.cancelPreparations?.();
+      await Promise.all(queue.pending.map(entry=>entry.preparation?.promise));
+      for (const entry of queue.pending) try {await journal.finish(entry.scanJob.seq,'pending');}catch(_){}
+      queue.pending.length=0;
       if (discovery) await discovery.promise;
       if (discovery && !discovery.frame) {
         try {await journal.finish(discovery.job.seq, 'pending');} catch (_) {}
@@ -3784,6 +3833,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     const scanConfig = options.scanConfig || currentScanConfig(options.rootName || ''),
       included = scanConfig.extensions,streaming = typeof entries === 'function',
       batchEntries = streaming ? null : [...entries];
+    scanConfig.workerCount=C.normalizeWorkerCount(scanConfig.workerCount);
     if (!included.size) {
       setScanUiState('error', {
         message: 'Custom scan requires at least one file type.'
@@ -3897,12 +3947,43 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       const group = protectedQuickGroups.get(row[0]) || [];group.push({ digest: row[1], decision });protectedQuickGroups.set(row[0], group);
     }
     const controller = {
-      cancelled: false, worker: workerClient(), jobId: null, cancelCurrent: null
+      cancelled: false, worker: null, jobId: null, cancelCurrent: null, lanes: [], preparingStopped: false
     };
+    for (let slot=0;slot<scanConfig.workerCount;slot++) controller.lanes.push({scanLane:true,worker:null,cancelCurrent:null,get cancelled(){return controller.cancelled||controller.preparingStopped;}});
+    controller.cancelPreparations = () => {controller.preparingStopped=true;for(const lane of controller.lanes){lane.cancelCurrent?.();lane.worker?.terminate();lane.worker=null;}};
+    controller.prepareEntry = async (entry, slot) => {
+      const lane=controller.lanes[slot],checkpoint=resumeScan?await checkpoints[entry.relativePath]:null;
+      // Capture checkpoint metadata between publications; worker tasks never access the database.
+      const completed=checkpoint?.state==='complete',savedSignature=checkpoint?.signature;
+      const promise=(async()=>{
+        let file,digest,generated,phase='read';
+        try {
+          if(scanConfig.scanArchives&&C.extensionOf(entry.name)==='zip')return {controller:lane};
+          file=await scanRetry(()=>boundedScanRead(entry.getFile(),lane,'Opening media file'),lane,'Opening '+entry.relativePath);
+          if(!Number.isSafeInteger(file.size)||file.size<=0)throw new Error('Empty or invalid media file.');
+          if(C.shouldSkipAge(file.lastModified,scanConfig)||(completed&&savedSignature===(entry.archiveSignature||[file.size,file.lastModified].join(':'))))return {file,controller:lane};
+          phase='hash';const quick=C.shouldUseQuickHash(C.extensionOf(file.name),file.size,scanConfig);
+          digest=await scanRetry(()=>hashFile(lane,file,C.cryptoRandom(),progress=>{
+            if(controller.activeLane!==lane)return;
+            setScanStatus('Fingerprinting in parallel:',entry.relativePath);
+            const fraction=progress.total?progress.done/progress.total:0;
+            $('#scan-progress').style.width=(candidates?(scan.hashed+scan.resumeSkipped+fraction)/Math.max(1,candidates.length)*100:fraction*100)+'%';
+          },quick?{type:'quick-hash',ranges:C.quickHashRanges(file.size)}:{}),lane,'Fingerprinting '+entry.relativePath);
+          const extension=C.extensionOf(file.name);
+          if(C.PREVIEW_EXTENSIONS.includes(extension)&&!C.VIDEO_EXTENSIONS.includes(extension)&&!C.RAW_EXTENSIONS.includes(extension)&&!['tif','tiff','heic','heif'].includes(extension)) {
+            try {const result=await scanImagePreview(file,lane);generated={...result,mime:result.blob.type,bytes:new Uint8Array(await result.blob.arrayBuffer())};}
+            catch(error){if(error.name==='AbortError')throw error;/* Publication retains the normal decoder fallback. */}
+          }
+          return {file,digest,generated,controller:lane};
+        }catch(error){return {file,digest,generated,error,phase,controller:lane};}
+      })();
+      return {promise,controller:lane};
+    };
+    scan.config={...(scan.config||{}),workerCount:scanConfig.workerCount};
 
     scanController = controller;
     scan.stopReason = '';scan.stopKind = '';
-    logActivity('info', resumeScan ? 'Scan resumed' : 'Scan started', ws.roots[rootId]?.label || rootId);
+    logActivity('info', resumeScan ? 'Scan resumed' : 'Scan started', (ws.roots[rootId]?.label || rootId) + ' · ' + scanConfig.workerCount + ' parallel file workers');
     renderResumeScan();
     setScanUiState('scanning');
     renderRoots();
@@ -3910,6 +3991,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     try {
       const processEntry = async (entry, index = null, total = null) => {
         if (controller.cancelled) return;
+        const prepared=entry.preparation?await entry.preparation.promise:null,fileController=prepared?.controller||controller.activeLane||controller;
         if (streaming) {
           scan.filesEnumerated++;
           setScanStatus('Searching:', entry.relativePath);
@@ -3940,7 +4022,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         }
         let file,hash,hashMethod = 'sha256',sampleDigest = null;
         try {
-          file = await scanRetry(() => boundedScanRead(entry.getFile(), controller, 'Opening media file'),controller,'Opening ' + rel);
+          if(prepared?.error&&prepared.phase==='read')throw prepared.error;
+          file = prepared?.file || await scanRetry(() => boundedScanRead(entry.getFile(), controller, 'Opening media file'),controller,'Opening ' + rel);
           if (controller.cancelled) return;
           if (!Number.isSafeInteger(file.size) || file.size <= 0) throw new Error('Empty or invalid media file.');
           if (C.shouldSkipAge(file.lastModified, scanConfig)) {scan.ageSkipped = (scan.ageSkipped || 0) + 1;return;}
@@ -3999,7 +4082,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         hashMethod = useQuick ? 'sampled-sha256-v1' : 'sha256';
         setScanStatus(`${useQuick ? 'Quick fingerprinting' : 'Hashing'} ${position}:`, rel);
         try {
-          const digest = await scanRetry(() => hashFile(controller, file, C.cryptoRandom(), (m) => {
+          if(prepared?.error)throw prepared.error;
+          const digest = prepared?.digest || await scanRetry(() => hashFile(fileController, file, C.cryptoRandom(), (m) => {
             const fileProgress = m.total ? m.done / m.total : 0,overall = total ?
               (index + fileProgress) / total : fileProgress;
             $('#scan-progress').style.width = `${overall * 100}%`;
@@ -4008,6 +4092,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           } : {}),controller,'Fingerprinting ' + rel);
           sampleDigest = useQuick ? digest : null;
           hash = useQuick ? C.quickHashIdentity(digest, rel) : digest;
+          if(prepared?.digest)$('#scan-progress').style.width=(total?(index+1)/Math.max(1,total)*100:100)+'%';
         }
         catch (error) {
           if (controller.cancelled) return;
@@ -4027,7 +4112,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           if (manifest && (await ws.decisions[protectedKey])) candidates.push({ digest: manifest[0], decision: await ws.decisions[protectedKey] });
           if (candidates.length) {
             try {
-              const full = await scanRetry(() => hashFile(controller, file, C.cryptoRandom(), () => {}),controller,'Verifying ' + rel);
+              const full = await scanRetry(() => hashFile(fileController, file, C.cryptoRandom(), () => {}),controller,'Verifying ' + rel);
               const match = candidates.find((item) => item.digest === full);
               if (match) {hash = match.decision.hash;hashMethod = 'sha256';useQuick = false;}
             } catch (error) {
@@ -4056,7 +4141,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
             } else
             if (!previousContent.sampleDigest || sampleMatches) {
               try {
-                const full = await hashFile(controller, file, C.cryptoRandom(), () => {});
+                const full = await scanRetry(()=>hashFile(fileController, file, C.cryptoRandom(), () => {}),controller,'Verifying '+rel);
                 if (full === previousFullSha256) {
                   previousContent.sampleDigest = sampleDigest;
                   previousContent.fullSha256 = previousFullSha256;
@@ -4171,7 +4256,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           if (C.PREVIEW_EXTENSIONS.includes(ext) && !(await hasThumbnail(hash))) {
             try {
               setScanStatus(`Creating saved preview for ${position}:`, rel);
-              const generated = await generateThumbnail(file, controller);
+              const generated = prepared?.generated || await generateThumbnail(file, controller);
               throwIfPreviewCancelled(controller);
               if (generated) {
                 await putThumbnail(hash, generated);
@@ -4201,18 +4286,13 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       if (streaming) {
         const listing = options.rootHandle ?
         await runJournalScan(options.rootHandle, scan, scanConfig, async (entry) => await processEntry(entry), controller) :
-        await entries(async (entry) => await processEntry(entry), controller);
+        await runPreparedEntries(accept=>entries(accept,controller),processEntry,controller,scanConfig.workerCount);
         const seenErrors = new Set(scan.errors.map((error) => error.path + '\0' + error.message));
         for (const error of listing.errors) {const id = error.path + '\0' + error.message;if (!seenErrors.has(id)) {recordScanError(scan, error);await seenErrors.add(id);}}
         scan.enumerationCancelled = listing.cancelled;
         scan.enumerationCoverage = listing.errors.length || listing.cancelled ? 'partial' : 'complete';
       } else
-      for (let i = 0;
-      i < candidates.length;
-      i++) {
-        if (controller.cancelled) break;
-        await processEntry(candidates[i], i, candidates.length);
-      }
+      await runPreparedEntries(async accept=>{for(let i=0;i<candidates.length&&!controller.cancelled;i++)await accept({...candidates[i],index:i,total:candidates.length});},entry=>processEntry(entry,entry.index,entry.total),controller,scanConfig.workerCount);
       scan.completedAt = new Date().toISOString();
       scan.completed = !controller.cancelled && !scan.errors.length;
       scan.stopKind = scan.completed ? 'complete' : controller.cancelled ? 'cancelled' : 'error';
@@ -4282,6 +4362,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     } finally
     {
       controller.worker?.terminate();
+      controller.cancelPreparations();
       if (scanController === controller) scanController = null;
       pendingResumeScanId = null;
       $('#folder-input').disabled = false;
@@ -5537,6 +5618,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   ));
   $('#exclude-user-appdata').addEventListener('change', async (e) => {ws.preferences.excludeUserApplicationData = e.target.checked;await setDirty();});
   $('#skip-older-years').addEventListener('change', async (e) => {ws.preferences.skipOlderYears = Math.max(0, Math.min(200, Math.floor(Number(e.target.value) || 0)));e.target.value = ws.preferences.skipOlderYears;await setDirty();});
+  $('#scan-worker-count').addEventListener('change',async event=>{ws.preferences.workerCount=C.normalizeWorkerCount(event.target.value);event.target.value=ws.preferences.workerCount;await setDirty();});
   $('#scan-archives').addEventListener('change', async (event) => {
     ws.preferences.scanArchives = event.target.checked;
     updateScanTypeSummary();
@@ -5621,6 +5703,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     setScanUiState('cancelling');
     scanController.cancelCurrent?.();
     scanController.worker?.terminate();
+    scanController.cancelPreparations?.();
   }
   );
   $('#background-scan').addEventListener('click', async () => {
