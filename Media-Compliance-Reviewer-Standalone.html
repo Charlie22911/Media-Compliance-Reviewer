@@ -2202,6 +2202,17 @@ full SHA-256.</small>
 <p class="tiny muted">Open an older database to upgrade it, then save an upgraded copy. The original file is preserved until you choose a save destination.</p>
 <button id="upgrade-database" class="primary">Upgrade database</button>
 </section>
+<section class="maintenance-panel stack">
+<h3>Database size</h3>
+<div class="field">
+<label for="evidence-database-limit">Database size limit for Evidence</label>
+<select id="evidence-database-limit" aria-describedby="evidence-database-limit-help">
+<option value="2.5">2.5 GB (default)</option>
+<option value="5">5 GB</option>
+</select>
+</div>
+<p id="evidence-database-limit-help" class="tiny muted">Checks the estimated total before adding an encrypted original. This setting is saved with the database. Normal scans can continue beyond this threshold; existing records are kept. Browser storage availability can impose a lower limit.</p>
+</section>
 <div class="notice">Protected maintenance tools require the Evidence password. They modify the database and never delete source files.</div>
 <div class="maintenance-grid">
 <section class="maintenance-panel stack">
@@ -2303,7 +2314,7 @@ destination according to your evidence-handling requirements. Stored Evidence re
 files in folders you select.</p>
 <dl class="about-details">
 <dt>Version</dt>
-<dd>3.2.0</dd>
+<dd>3.2.1</dd>
 <dt>Authored by</dt>
 <dd>IT1 McPherson, Charlie</dd>
 <dt>Release date</dt>
@@ -2316,7 +2327,8 @@ user. Processing stays on the local computer unless the selected folder or datab
 <button id="decoder-license-button" class="small">Decoder license</button>
 <button id="database-license-button" class="small">Database license</button>
 <h3>Change log</h3>
-<details class="change-entry" open><summary>Version 3.2.0 · October 6, 2026</summary><ul><li>Added offline video-poster decoding when the browser cannot decode a video, including HEVC MOV.</li><li>Keep saved image thumbnails and video posters in the database for review after the source is disconnected. Sorting reloads these saved previews.</li><li>Added preview recovery for camera RAW files that contain a readable embedded JPEG and a browser-image fallback for formats such as SVG.</li></ul></details>
+<details class="change-entry" open><summary>Version 3.2.1 · October 6, 2026</summary><ul><li>Raised the estimated database size limit for adding Evidence originals to 2.5 GB by default, with a 5 GB option in Maintenance. The choice is saved with each database. Normal scans can continue beyond this threshold while browser storage is available.</li></ul></details>
+<details class="change-entry"><summary>Version 3.2.0 · October 6, 2026</summary><ul><li>Added offline video-poster decoding when the browser cannot decode a video, including HEVC MOV.</li><li>Keep saved image thumbnails and video posters in the database for review after the source is disconnected. Sorting reloads these saved previews.</li><li>Added preview recovery for camera RAW files that contain a readable embedded JPEG and a browser-image fallback for formats such as SVG.</li></ul></details>
 <details class="change-entry"><summary>Version 3.1.2 · October 6, 2026</summary><ul><li>Made scan date, oldest first, the default result order.</li><li>Refresh displayed previews and retry missing previews when the sort order changes. Preview rebuilding no longer delays result sorting or page changes.</li><li>Added a separate progress window while opening and checking a database.</li></ul></details>
 <details class="change-entry"><summary>Version 3.1.1 · October 6, 2026</summary><ul><li>Kept database information visible while its item count and size refresh during scanning and saving.</li></ul></details>
 <details class="change-entry"><summary>Version 3.1.0 · October 5, 2026</summary><ul><li>Moved database work into a background worker and stored working database pages on browser disk storage.</li><li>Added small write batches with a bounded producer queue and reused database statements. Completed scan records and their progress checkpoints commit together.</li><li>Streamed database imports, saved snapshots, and encrypted Evidence reads in chunks while retaining portable SQLite files and offline Forge support.</li></ul></details>
@@ -2589,10 +2601,10 @@ user. Processing stays on the local computer unless the selected folder or datab
 <li><strong>No preview:</strong> reconnect the source, then change the sort order to retry missing previews or choose Inspect. Creating a preview requires the original once; a saved preview does not. If a scan is running, preview rebuilding waits until it finishes. HEIC/HEIF and video-poster decoding are included offline. RAW files need a readable embedded JPEG. Damaged files, unsupported variants, and files exceeding the decoder's resource limits may still lack a preview.</li>
 <li><strong>Scan paused with read errors:</strong> check access to the source folder and choose Resume scan to retry unfinished items.</li>
 <li><strong>Saving stopped because the file changed:</strong> save the offered conflict copy, then ask the database owner to reconcile the copies. Do not overwrite someone else's changes.</li>
-<li><strong>Large database or slow operation:</strong> the working database uses browser disk storage with limited caches. Opening and saving large databases can still take time; watch the progress indicator. Original-image decoding can use substantial memory. Allow enough free disk space for the working copy and a saved snapshot. Evidence capture is blocked if adding an original would exceed the 500 MiB database safety limit.</li>
+<li><strong>Large database or slow operation:</strong> the working database uses browser disk storage with limited caches. Opening and saving large databases can still take time; watch the progress indicator. Original-image decoding can use substantial memory. Allow enough free disk space for the working copy and a saved snapshot. Evidence capture checks the estimated database size before adding an original. The default threshold is 2.5 GB; choose 5 GB under Maintenance → Database size limit for Evidence to allow larger captures. This choice is saved with the database. Normal scans can continue beyond this threshold while browser storage is available.</li>
 </ul>
 <h3>Privacy and storage</h3>
-<p id="help-working-storage">The app keeps a working copy in browser storage on this computer. Database queries and writes run in a background worker; file fingerprints also run in a worker. The portable database file is updated when saving finishes. Wait for the saving indicator to disappear before closing, moving the file, or opening it on another computer.</p><p>Browser storage is not a backup. Clearing browser data or using a different browser can remove access to the working copy. Save the portable database file regularly. Standalone browser recovery, when offered, uses a locally saved snapshot; Forge requires reopening the saved database file. Use a browser that supports IndexedDB and allow enough free disk space.</p>
+<p id="help-working-storage">The browser keeps a working copy locally. Database queries and writes run in a background worker; file fingerprints also run in a worker. The portable database file is updated when saving finishes. Wait for the saving indicator to disappear before closing, moving the file, or opening it on another computer.</p><p>Browser storage is not a backup. Clearing browser data or using a different browser can remove access to the working copy. Save the portable database file regularly. Standalone browser recovery, when offered, uses a locally saved snapshot; Forge requires reopening the saved database file. Use a browser that supports IndexedDB and allow enough free disk space.</p>
 <p>The app runs offline without automatic network requests or downloads. Files selected from a network share are still read through that share. External links in the About license sections open websites when clicked. The database holds review records, saved previews, scan progress, and encrypted Evidence; ordinary items do not include a stored copy of the full original.</p>
 <p>Use one active writer per shared database. The app checks for outside changes before saving, but this is not a substitute for coordinating access. Reviewer labels are self-reported, and local history is not a tamper-proof chain of custody.</p>
 <h3>Included software</h3>
@@ -4025,7 +4037,7 @@ Library.
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.0', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.1', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -4041,7 +4053,8 @@ Library.
       events: [], maintenanceEvents: [], preferences: {
         scanExtensions: new Set(ALL_EXTENSIONS), visibleExtensions: new Set(ALL_EXTENSIONS),
         scanMode: 'deep', scanArchives: false, excludeUserApplicationData: true, skipOlderYears: 0, quickVideoHash: true,
-        quickVideoThresholdMiB: 1, thumbSize: 210, thumbnailFit: 'fit', itemsPerPage: 60
+        quickVideoThresholdMiB: 1, thumbSize: 210, thumbnailFit: 'fit', itemsPerPage: 60,
+        evidenceDatabaseLimitGb: 2.5
       }
     };
 
@@ -4052,7 +4065,7 @@ Library.
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.2.0', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.2.1', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -4075,6 +4088,7 @@ Library.
     obj.preferences.thumbSize = Number(obj.preferences.thumbSize) || 210;
     obj.preferences.thumbnailFit = obj.preferences.thumbnailFit === 'fill' ? 'fill' : 'fit';
     obj.preferences.itemsPerPage = normalizePageSize(obj.preferences.itemsPerPage);
+    obj.preferences.evidenceDatabaseLimitGb = Number(obj.preferences.evidenceDatabaseLimitGb) === 5 ? 5 : 2.5;
     obj.roots = obj.roots || {
     };
 
@@ -5977,7 +5991,7 @@ globalThis.MEDIA_SQLITE_WASM="AGFzbQEAAAABiwREYAJ/fwF/YAF/AX9gA39/fwBgA39/fwF/YA
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.0', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.1', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -5993,7 +6007,8 @@ globalThis.MEDIA_SQLITE_WASM="AGFzbQEAAAABiwREYAJ/fwF/YAF/AX9gA39/fwBgA39/fwF/YA
       events: [], maintenanceEvents: [], preferences: {
         scanExtensions: new Set(ALL_EXTENSIONS), visibleExtensions: new Set(ALL_EXTENSIONS),
         scanMode: 'deep', scanArchives: false, excludeUserApplicationData: true, skipOlderYears: 0, quickVideoHash: true,
-        quickVideoThresholdMiB: 1, thumbSize: 210, thumbnailFit: 'fit', itemsPerPage: 60
+        quickVideoThresholdMiB: 1, thumbSize: 210, thumbnailFit: 'fit', itemsPerPage: 60,
+        evidenceDatabaseLimitGb: 2.5
       }
     };
 
@@ -6004,7 +6019,7 @@ globalThis.MEDIA_SQLITE_WASM="AGFzbQEAAAABiwREYAJ/fwF/YAF/AX9gA39/fwBgA39/fwF/YA
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.2.0', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.2.1', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -6027,6 +6042,7 @@ globalThis.MEDIA_SQLITE_WASM="AGFzbQEAAAABiwREYAJ/fwF/YAF/AX9gA39/fwBgA39/fwF/YA
     obj.preferences.thumbSize = Number(obj.preferences.thumbSize) || 210;
     obj.preferences.thumbnailFit = obj.preferences.thumbnailFit === 'fill' ? 'fill' : 'fit';
     obj.preferences.itemsPerPage = normalizePageSize(obj.preferences.itemsPerPage);
+    obj.preferences.evidenceDatabaseLimitGb = Number(obj.preferences.evidenceDatabaseLimitGb) === 5 ? 5 : 2.5;
     obj.roots = obj.roots || {
     };
 
@@ -6356,8 +6372,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   const workspaceFileVersions = new WeakMap();
   const evidenceMetadataCache = new Map();
   const evidencePreviewCache = new Map();
-  const MAX_THUMBNAIL_DIMENSION = 256,MAX_THUMBNAIL_BYTES = 32768,WORKSPACE_WARNING_BYTES =
-    500 * 1024 * 1024,EVIDENCE_CHUNK_BYTES = 4 * 1024 * 1024,
+  const MAX_THUMBNAIL_DIMENSION = 256,MAX_THUMBNAIL_BYTES = 32768,
+    EVIDENCE_CHUNK_BYTES = 4 * 1024 * 1024,
     EVIDENCE_DISPLAY_LIMIT = 128 * 1024 * 1024,DRAG_THRESHOLD = 6,VAULT_ITERATIONS = 250000,
     VAULT_CHECK_TEXT =
     'ImageComplianceReviewer evidence vault v1';
@@ -6468,6 +6484,19 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       return 0;
     }
   }
+  function evidenceDatabaseLimitGb() {
+    return Number(ws.preferences.evidenceDatabaseLimitGb) === 5 ? 5 : 2.5;
+  }
+  function evidenceDatabaseLimitBytes() {
+    return evidenceDatabaseLimitGb() * 1000 * 1000 * 1000;
+  }
+  async function assertEvidenceCapacity(fileSize) {
+    const estimatedSize = (await databaseSizeBytes()) + Math.ceil(fileSize * 1.08);
+    if (estimatedSize > evidenceDatabaseLimitBytes()) throw new Error(
+      `Evidence capture would exceed the ${evidenceDatabaseLimitGb()} GB database size limit. ` +
+      (evidenceDatabaseLimitGb() === 2.5 ? 'Open Maintenance to raise this limit to 5 GB, or start a separate database.' :
+        'Start a separate database or choose a smaller original.'));
+  }
   async function workspaceFileVersion(file) {
     const sampleSize = 64 * 1024,headEnd = Math.min(file.size, sampleSize),tailStart =
       Math.max(headEnd, file.size - sampleSize),head = new Uint8Array(await file.slice(0, headEnd).
@@ -6536,7 +6565,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     saveState.textContent = workspaceWritable ? ' · Auto-save active' :
     ' · Save once to enable auto-save';
     fragment.append(saveState);
-    if (bytes > WORKSPACE_WARNING_BYTES) {
+    if (bytes > evidenceDatabaseLimitBytes()) {
       const w = document.createElement('span');
       w.className = 'unsaved';
       w.textContent = ' · large database';
@@ -8243,6 +8272,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           file = await connectedFile(source);
           assertEvidenceOperationCurrent(operation);
           if (!file) throw new Error('Reconnect the source folder.');
+          await assertEvidenceCapacity(file.size);
+          assertEvidenceOperationCurrent(operation);
           const sourceMethod = contentHashMethod(card.content, card.decision.hash);
           if (sourceMethod === 'sampled-sha256-v1') {
             await verifyQuickFingerprint(file, card.content);
@@ -8261,10 +8292,6 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
             card = await splitVerifiedOccurrence(card, source, verifiedHash);key = card.key;
             source = card.occurrences.find((item) => item.path === source.path) || card.occurrences[0];
           }
-          const estimatedSize = (await databaseSizeBytes()) + Math.ceil(file.size * 1.08);
-          if (estimatedSize > WORKSPACE_WARNING_BYTES) throw new Error(
-            `Evidence capture would exceed the ${formatBytes(WORKSPACE_WARNING_BYTES)} ` +
-            'database safety limit. Start a separate database or reduce the item size.');
           snapshot = await snapshotEvidenceWorkspaceItem(key);
           const now = new Date().toISOString(),event = {
               id: C.cryptoRandom(), decisionKey: key, previousStatus: card.decision.status,
@@ -8838,6 +8865,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       toast('Finish the active operation before opening maintenance.', true);return;
     }
     if (!db) return;
+    $('#evidence-database-limit').value = String(evidenceDatabaseLimitGb());
     agedPreviewKeys = [];
     lastMaintenancePlan = null;
     $('#aged-purge-run').disabled = true;
@@ -10401,7 +10429,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         const largeWorkspaceMessage =
         `Scan completed. Database is now ${formatBytes(await databaseSizeBytes())}; ` +
         'consider starting a new database for the next review period.';
-        toast((await databaseSizeBytes()) > WORKSPACE_WARNING_BYTES ?
+        toast((await databaseSizeBytes()) > evidenceDatabaseLimitBytes() ?
         largeWorkspaceMessage : `Scan completed: ${readyCount} media items ready.`);
       }
     }
@@ -12263,6 +12291,15 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   $('#reset-display-filters').addEventListener('click', () => $('#clear-filters').click());
   $('#decoder-license-button').addEventListener('click', () => $('#decoder-license').showModal());
   $('#database-license-button').addEventListener('click',()=>$('#database-license').showModal());
+  $('#evidence-database-limit').addEventListener('change', async (event) => {
+    if (scanController || evidenceOperationInFlight) {
+      event.target.value = String(evidenceDatabaseLimitGb());
+      toast('Finish the active operation before changing the database size limit.', true);return;
+    }
+    ws.preferences.evidenceDatabaseLimitGb = Number(event.target.value) === 5 ? 5 : 2.5;
+    await setDirty();
+    toast(`Evidence database size limit set to ${evidenceDatabaseLimitGb()} GB. Save the database to keep this setting.`);
+  });
   $('#upgrade-database').addEventListener('click', async () => {
     if (scanController || evidenceOperationInFlight) {toast('Finish the active operation before upgrading.', true);return;}
     try {if (upgradePending) await saveWorkspace();else toast('This database is current. Opening an older database upgrades a working copy; Save creates its upgraded file.');}

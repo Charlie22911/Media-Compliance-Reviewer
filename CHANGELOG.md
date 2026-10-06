@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.2.1 — October 6, 2026
+
+- Raised the estimated database size limit for adding Evidence originals to 2.5 GB by default.
+- Added a 5 GB option under Maintenance, saved with each database. Normal scans can continue beyond this threshold while browser storage is available.
+
 ## 3.2.0 — October 6, 2026
 
 - Added offline video-poster decoding when the browser cannot decode a video, including HEVC MOV.

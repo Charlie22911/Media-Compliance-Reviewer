@@ -46,7 +46,7 @@ Use **Maintenance → Upgrade database** to update an older database format. Sav
 
 The browser keeps a working copy locally. That storage is not a backup and may be removed when browser data is cleared. Keep regular copies of the saved portable database. The wrapped edition requires reopening the saved database; standalone browser recovery, when offered, uses a saved local snapshot.
 
-Allow enough disk space for the working copy and saved snapshots. Saved previews increase the database's size as the collection grows. Evidence capture is blocked if adding an original would exceed the 500 MiB database safety limit. Opening and saving large databases can take time; watch the progress indicators.
+Allow enough disk space for the working copy and saved snapshots. Saved previews increase the database's size as the collection grows. Evidence capture checks the estimated total database size before adding an encrypted original. The default threshold is **2.5 GB**. To raise it, open **Maintenance → Database size limit for Evidence** and choose **5 GB**, then save the database. The choice is kept with that database. Normal scans can continue beyond this threshold while browser storage is available; existing records and previews are kept. Browser storage availability can impose a lower limit. Opening and saving large databases can take time; watch the progress indicators.
 
 ## Source and building
 

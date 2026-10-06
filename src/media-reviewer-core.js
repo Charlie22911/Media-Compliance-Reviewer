@@ -893,7 +893,7 @@
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.0', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.2.1', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -909,7 +909,8 @@
       events: [], maintenanceEvents: [], preferences: {
         scanExtensions: new Set(ALL_EXTENSIONS), visibleExtensions: new Set(ALL_EXTENSIONS),
         scanMode: 'deep', scanArchives: false, excludeUserApplicationData: true, skipOlderYears: 0, quickVideoHash: true,
-        quickVideoThresholdMiB: 1, thumbSize: 210, thumbnailFit: 'fit', itemsPerPage: 60
+        quickVideoThresholdMiB: 1, thumbSize: 210, thumbnailFit: 'fit', itemsPerPage: 60,
+        evidenceDatabaseLimitGb: 2.5
       }
     };
 
@@ -920,7 +921,7 @@
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.2.0', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.2.1', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -943,6 +944,7 @@
     obj.preferences.thumbSize = Number(obj.preferences.thumbSize) || 210;
     obj.preferences.thumbnailFit = obj.preferences.thumbnailFit === 'fill' ? 'fill' : 'fit';
     obj.preferences.itemsPerPage = normalizePageSize(obj.preferences.itemsPerPage);
+    obj.preferences.evidenceDatabaseLimitGb = Number(obj.preferences.evidenceDatabaseLimitGb) === 5 ? 5 : 2.5;
     obj.roots = obj.roots || {
     };
 

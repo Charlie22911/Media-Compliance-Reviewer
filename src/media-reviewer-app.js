@@ -31,8 +31,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   const workspaceFileVersions = new WeakMap();
   const evidenceMetadataCache = new Map();
   const evidencePreviewCache = new Map();
-  const MAX_THUMBNAIL_DIMENSION = 256,MAX_THUMBNAIL_BYTES = 32768,WORKSPACE_WARNING_BYTES =
-    500 * 1024 * 1024,EVIDENCE_CHUNK_BYTES = 4 * 1024 * 1024,
+  const MAX_THUMBNAIL_DIMENSION = 256,MAX_THUMBNAIL_BYTES = 32768,
+    EVIDENCE_CHUNK_BYTES = 4 * 1024 * 1024,
     EVIDENCE_DISPLAY_LIMIT = 128 * 1024 * 1024,DRAG_THRESHOLD = 6,VAULT_ITERATIONS = 250000,
     VAULT_CHECK_TEXT =
     'ImageComplianceReviewer evidence vault v1';
@@ -143,6 +143,19 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       return 0;
     }
   }
+  function evidenceDatabaseLimitGb() {
+    return Number(ws.preferences.evidenceDatabaseLimitGb) === 5 ? 5 : 2.5;
+  }
+  function evidenceDatabaseLimitBytes() {
+    return evidenceDatabaseLimitGb() * 1000 * 1000 * 1000;
+  }
+  async function assertEvidenceCapacity(fileSize) {
+    const estimatedSize = (await databaseSizeBytes()) + Math.ceil(fileSize * 1.08);
+    if (estimatedSize > evidenceDatabaseLimitBytes()) throw new Error(
+      `Evidence capture would exceed the ${evidenceDatabaseLimitGb()} GB database size limit. ` +
+      (evidenceDatabaseLimitGb() === 2.5 ? 'Open Maintenance to raise this limit to 5 GB, or start a separate database.' :
+        'Start a separate database or choose a smaller original.'));
+  }
   async function workspaceFileVersion(file) {
     const sampleSize = 64 * 1024,headEnd = Math.min(file.size, sampleSize),tailStart =
       Math.max(headEnd, file.size - sampleSize),head = new Uint8Array(await file.slice(0, headEnd).
@@ -211,7 +224,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     saveState.textContent = workspaceWritable ? ' · Auto-save active' :
     ' · Save once to enable auto-save';
     fragment.append(saveState);
-    if (bytes > WORKSPACE_WARNING_BYTES) {
+    if (bytes > evidenceDatabaseLimitBytes()) {
       const w = document.createElement('span');
       w.className = 'unsaved';
       w.textContent = ' · large database';
@@ -1918,6 +1931,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           file = await connectedFile(source);
           assertEvidenceOperationCurrent(operation);
           if (!file) throw new Error('Reconnect the source folder.');
+          await assertEvidenceCapacity(file.size);
+          assertEvidenceOperationCurrent(operation);
           const sourceMethod = contentHashMethod(card.content, card.decision.hash);
           if (sourceMethod === 'sampled-sha256-v1') {
             await verifyQuickFingerprint(file, card.content);
@@ -1936,10 +1951,6 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
             card = await splitVerifiedOccurrence(card, source, verifiedHash);key = card.key;
             source = card.occurrences.find((item) => item.path === source.path) || card.occurrences[0];
           }
-          const estimatedSize = (await databaseSizeBytes()) + Math.ceil(file.size * 1.08);
-          if (estimatedSize > WORKSPACE_WARNING_BYTES) throw new Error(
-            `Evidence capture would exceed the ${formatBytes(WORKSPACE_WARNING_BYTES)} ` +
-            'database safety limit. Start a separate database or reduce the item size.');
           snapshot = await snapshotEvidenceWorkspaceItem(key);
           const now = new Date().toISOString(),event = {
               id: C.cryptoRandom(), decisionKey: key, previousStatus: card.decision.status,
@@ -2513,6 +2524,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       toast('Finish the active operation before opening maintenance.', true);return;
     }
     if (!db) return;
+    $('#evidence-database-limit').value = String(evidenceDatabaseLimitGb());
     agedPreviewKeys = [];
     lastMaintenancePlan = null;
     $('#aged-purge-run').disabled = true;
@@ -4076,7 +4088,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         const largeWorkspaceMessage =
         `Scan completed. Database is now ${formatBytes(await databaseSizeBytes())}; ` +
         'consider starting a new database for the next review period.';
-        toast((await databaseSizeBytes()) > WORKSPACE_WARNING_BYTES ?
+        toast((await databaseSizeBytes()) > evidenceDatabaseLimitBytes() ?
         largeWorkspaceMessage : `Scan completed: ${readyCount} media items ready.`);
       }
     }
@@ -5938,6 +5950,15 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   $('#reset-display-filters').addEventListener('click', () => $('#clear-filters').click());
   $('#decoder-license-button').addEventListener('click', () => $('#decoder-license').showModal());
   $('#database-license-button').addEventListener('click',()=>$('#database-license').showModal());
+  $('#evidence-database-limit').addEventListener('change', async (event) => {
+    if (scanController || evidenceOperationInFlight) {
+      event.target.value = String(evidenceDatabaseLimitGb());
+      toast('Finish the active operation before changing the database size limit.', true);return;
+    }
+    ws.preferences.evidenceDatabaseLimitGb = Number(event.target.value) === 5 ? 5 : 2.5;
+    await setDirty();
+    toast(`Evidence database size limit set to ${evidenceDatabaseLimitGb()} GB. Save the database to keep this setting.`);
+  });
   $('#upgrade-database').addEventListener('click', async () => {
     if (scanController || evidenceOperationInFlight) {toast('Finish the active operation before upgrading.', true);return;}
     try {if (upgradePending) await saveWorkspace();else toast('This database is current. Opening an older database upgrades a working copy; Save creates its upgraded file.');}
