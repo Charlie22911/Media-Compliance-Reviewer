@@ -21,7 +21,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     workspaceWriteChain = Promise.resolve(),dbSyncSnapshot = null,exportCache = null,
     lastWorkspaceWriteAt = 0,recoveryEnabled =
     !forgeRuntimeActive();
-  let upgradePending = false,databaseGeneration = 0;
+  let upgradePending = false,databaseGeneration = 0,lastRecoveryWriteAt = 0,lastSnapshotDuration = 0,lastDatabaseBytes = 0,lastSaveDuration = 0,reportExportActive = false;
   const fileByOccurrence = new Map();
   const directoryHandleByRoot = new Map();
   const renderedThumbnailUrls = new Set();
@@ -81,6 +81,10 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   window.addEventListener('media-database-retry', event => {
     logActivity('warning','Retrying database operation (' + event.detail.attempt + ' of 3)',event.detail.method + ': ' + event.detail.message);
   });
+  window.addEventListener('media-database-progress', event => {
+    const progress=event.detail;
+    if(progress.phase === 'Preparing snapshot' && !progress.queued)showOperation('Saving database',progress.phase,progress.done,progress.total);
+  });
   window.addEventListener('media-source-cleanup-error', event => {logActivity('warning','A temporary source handle could not be released after retries',event.detail.message);});
   window.addEventListener('error', event => {if (event.message) logActivity('error','Application error',event.error?.stack || event.message);});
   window.addEventListener('unhandledrejection', event => {logActivity('error','Operation did not finish',event.reason?.stack || event.reason?.message || event.reason);toast('An operation failed. Open Log for details.', true);});
@@ -94,6 +98,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     toast.timer = setTimeout(async () => await t.classList.add('hidden'), 4200);
   }
   function assertNoEvidenceOperation(purpose) {
+    if (reportExportActive) throw new Error('Wait for report export to finish.');
     if (!activeEvidenceOperation && !evidenceOperationInFlight) return;
     const active = activeEvidenceOperation?.purpose || 'active';
     throw new Error(`Wait for the ${active} Evidence operation to finish before you ${purpose}.`);
@@ -154,17 +159,38 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     return types[ext] || 'application/octet-stream';
   }
   async function setDirty(value = true) {
+    if(!scanController)catalogTotalsCache=null;
     dirty = value;
     if (value) {
       changeRevision++;
       ws.updatedAt = new Date().toISOString();
       exportCache = null;
     }
-    await renderWorkspaceState();
+    requestWorkspaceState();
     if (value) {
       scheduleRecovery();
       scheduleAutoSave();
     }
+  }
+  let workspaceStateTimer = null,workspaceStateBusy = false,workspaceStatePending = false;
+  function requestWorkspaceState() {
+    workspaceStatePending = true;
+    if (workspaceStateBusy || workspaceStateTimer !== null) return;
+    workspaceStateTimer = setTimeout(async () => {
+      workspaceStateTimer = null;workspaceStateBusy = true;workspaceStatePending = false;
+      try {await renderWorkspaceState();}
+      catch (error) {logActivity('warning', 'Database status could not refresh', error.message);}
+      finally {workspaceStateBusy = false;if (workspaceStatePending) requestWorkspaceState();}
+    }, 1000);
+  }
+  let catalogTotalsCache = null;
+  async function catalogTotals() {
+    const database = db,now = Date.now();
+    if(!database)return new Map();
+    if (catalogTotalsCache?.database === database && (!catalogTotalsCache.settled || now - catalogTotalsCache.at < 2000)) return catalogTotalsCache.promise;
+    const entry = {database,at:now,promise:null};
+    entry.promise = database.exec("SELECT status,COUNT(*) FROM catalog_records WHERE kind='decisions' GROUP BY status").then(result => {entry.settled=true;entry.at=Date.now();return new Map(result[0]?.values || []);}).catch(error => {if(catalogTotalsCache === entry)catalogTotalsCache = null;throw error;});
+    catalogTotalsCache = entry;return entry.promise;
   }
   async function databaseSizeBytes() {
     if (!db) return 0;
@@ -238,10 +264,9 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     const current = () => token === workspaceStateRenderToken && database === db && workspace === ws;
     let bytes,items;
     try {
-      bytes = await databaseSizeBytes();
+      bytes = await databaseSizeBytes();lastDatabaseBytes = bytes;
       if (!current()) return;
-      items = workspace.decisions.$countValue ? await workspace.decisions.$countValue() :
-      (await MediaDatabase.recordKeys(workspace.decisions)).length;
+      items = [...(await catalogTotals()).values()].reduce((sum, count) => sum + Number(count), 0);
     } catch (error) {
       if (current()) throw error;
       return;
@@ -270,6 +295,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       b.textContent = ' · unsaved changes';
       fragment.append(b);
     }
+    if (lastWorkspaceWriteAt) {const last=document.createElement('span');last.textContent=' · last saved '+new Date(lastWorkspaceWriteAt).toLocaleTimeString();fragment.append(last);}
     if (autoSaveError) {
       const e = document.createElement('span');
       e.className = 'unsaved';
@@ -516,11 +542,11 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   async function syncDb() {
     if (!db) return;
-    const json = JSON.stringify(C.serializeWorkspace(ws)),tables = workspaceDbTables(),
-      nextSnapshot = new Map();
+    const nextSnapshot = new Map();
     let databaseChanged = !dbSyncSnapshot;
     await db.run('BEGIN');
     try {
+      const json = JSON.stringify(C.serializeWorkspace(ws)),tables = workspaceDbTables();
       await db.run(C.SQL_STATEMENTS.upsertWorkspace, ['workspace_json', json]);
       for (const [name, keyColumn, insertSql, rows] of tables) {
         const previous = dbSyncSnapshot?.get(name) || new Map(),changes =
@@ -557,7 +583,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     do {await databaseClient.waitForTransaction();} while (databaseClient.transactionOpen);
     await syncDb();
     const revision = changeRevision;
-    return await databaseClient.snapshot(revision);
+    const started=Date.now();const snapshot=await databaseClient.snapshot(revision);lastSnapshotDuration=Date.now()-started;lastDatabaseBytes=snapshot.size;return snapshot;
   }
   async function loadDb(bytes, closeWorkspaceDialog = true) {
     assertNoEvidenceOperation('open a database');
@@ -585,7 +611,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     changeRevision = 0;
     dbSyncSnapshot = null;
     exportCache = null;
-    lastWorkspaceWriteAt = 0;
+    lastWorkspaceWriteAt = 0;lastRecoveryWriteAt=0;lastSnapshotDuration=0;lastSaveDuration=0;lastDatabaseBytes=0;
     autoSaveError = '';
     vaultKey = null;cancelPreviewJobs();
     evidenceMetadataCache.clear();
@@ -607,9 +633,13 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     if (closeWorkspaceDialog) await $('#workspace-dialog').close();
   }
   let recoveryTimer = null,recoveryDueAt = 0,recoveryInFlight = false,recoveryQueued = false;
+  function automaticSaveInterval() {
+    const minimum = [1,5,15].includes(Number(ws.preferences.autoSaveMinutes)) ? Number(ws.preferences.autoSaveMinutes) * 60000 : AUTO_SAVE_MIN_INTERVAL;
+    return Math.max(minimum, Math.min(30*60000, Math.max(lastSnapshotDuration,lastSaveDuration)*4), Math.min(15*60000,Math.ceil(lastDatabaseBytes/(512*1024*1024))*60000));
+  }
   function scheduleRecovery(delay = 650) {
-    if (!recoveryEnabled) return;
-    delay = Math.max(delay, 60000 - (Date.now() - (lastWorkspaceWriteAt || 0)));
+    if (!recoveryEnabled || workspaceWritable && !autoSaveError) return;
+    delay = Math.max(delay, automaticSaveInterval() - (Date.now() - Math.max(lastRecoveryWriteAt,lastWorkspaceWriteAt)));
     if (recoveryInFlight) {
       recoveryQueued = true;
       return;
@@ -626,15 +656,15 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   async function persistRecovery() {
     if (!recoveryEnabled) return;
-    if (evidenceOperationInFlight) {
-      scheduleRecovery();
+    if (evidenceOperationInFlight || reportExportActive) {
+      scheduleRecovery(10000);
       return;
     }
     recoveryInFlight = true;
     recoveryQueued = false;
     const workspaceId = ws.id,database = db,revision = changeRevision;
     try {
-      const recover = async () => {if (ws.id === workspaceId && db === database) await idbPut(await exportWorkspaceBytes());};
+      const recover = async () => {if (ws.id === workspaceId && db === database) {await idbPut(await exportWorkspaceBytes());lastRecoveryWriteAt=Date.now();}};
       workspaceWriteChain = workspaceWriteChain.catch(() => {}).then(recover);
       await workspaceWriteChain;
     }
@@ -643,7 +673,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       if (!forgeRuntimeActive()) toast('Browser recovery failed: ' + e.message, true);
     } finally
     {
-      recoveryInFlight = false;
+      recoveryInFlight = false;finishOperation('Saving database');
       if (recoveryEnabled && (recoveryQueued || workspaceId !== ws.id || database !== db ||
       revision !== changeRevision)) scheduleRecovery();
     }
@@ -651,7 +681,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   function scheduleAutoSave(delay = 1000) {
     if (!workspaceWritable || !workspaceFileHandle?.createWritable) return;
     const elapsed = Date.now() - lastWorkspaceWriteAt,remaining =
-      Math.max(0, AUTO_SAVE_MIN_INTERVAL - elapsed),dueAt = Date.now() +
+      Math.max(0, automaticSaveInterval() - elapsed),dueAt = Date.now() +
       Math.max(delay, remaining);
     if (autoSaveTimer && autoSaveDueAt <= dueAt) return;
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
@@ -664,7 +694,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   async function autoSaveWorkspace() {
     if (!workspaceWritable || !workspaceFileHandle?.createWritable) return;
-    if (evidenceOperationInFlight) {
+    if (evidenceOperationInFlight || reportExportActive) {
       autoSaveQueued = true;
       return;
     }
@@ -691,6 +721,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     {
       autoSaveInFlight = false;
       if (autoSaveQueued || dirty) scheduleAutoSave();
+      if(autoSaveError)scheduleRecovery();
     }
   }
   function idbOpen() {
@@ -783,6 +814,22 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     [hash, thumb.mime, thumb.width, thumb.height, thumb.bytes]);
     thumbnailBytes += thumb.bytes.byteLength;
   }
+  let decodeTail = Promise.resolve(),decodeWaiting = 0;
+  async function withDecodePermit(controller, operation) {
+    if(decodeWaiting >= 12)throw Object.assign(new Error('Preview queue is full; try again after current previews finish.'),{code:'DECODE_QUEUE_FULL'});
+    decodeWaiting++;
+    const generation = databaseGeneration,previous = decodeTail;
+    let release;decodeTail = new Promise(resolve => release = resolve);
+    await previous;
+    decodeWaiting--;
+    try {
+      if (generation !== databaseGeneration || controller?.cancelled) throw previewAbortError();
+      return await operation();
+    } finally {release();}
+  }
+  function decodeError(value) {
+    return Object.assign(new Error(typeof value === 'string' ? value : value.message), {code:value.code || 'DECODE_FAILED'});
+  }
   let previewWorker = null,previewJobs = [],previewActive = null,previewIdleTimer = null,previewWorkerKind = null;
   function resetPreviewWorker() {previewWorker?.terminate();previewWorker = null;previewWorkerKind = null;clearTimeout(previewIdleTimer);}
   function cancelPreviewJobs() {
@@ -816,16 +863,17 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     previewWorker.onmessage = async (e) => {
       const value = e.data;if (value.jobId !== job.jobId) return;
       if (job.generation !== databaseGeneration || job.controller?.cancelled) {await finish(previewAbortError());return;}
-      await finish(value.error ? new Error(value.error) : null, value.result);
+      await finish(value.error ? decodeError(value.error) : null, value.result);
     };
     previewWorker.onerror = async (e) => await finish(new Error(e.message || 'Preview worker failed.'));
-    job.timer = setTimeout(async () => await finish(new Error('Preview timed out; decoding worker was stopped.')), 15000);
+    job.timer = setTimeout(async () => await finish(Object.assign(new Error('Preview timed out; decoding worker was stopped.'), {code:'DECODE_TIMEOUT'})), 15000);
     job.cancelTimer = setInterval(async () => {if (job.controller?.cancelled || job.generation !== databaseGeneration) await finish(previewAbortError());}, 100);
     previewWorker.postMessage({ file: job.file, extension: job.extension, purpose: job.purpose, jobId: job.jobId, generation: job.generation });
   }
   async function formatDisplayBlob(input, extension) {
     const file = input instanceof File ? input : new File([input], 'display.' + extension);
-    return await decodePreview(file, 'inspect', null, extension);
+    const token=inspectRenderToken,controller={get cancelled(){return token!==inspectRenderToken;}};
+    return await withDecodePermit(controller, () => decodePreview(file, 'inspect', controller, extension));
   }
 
   function previewAbortError() {
@@ -1000,7 +1048,10 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       URL.revokeObjectURL(sourceUrl);
     }
   }
-  async function generateThumbnail(file, controller) {
+  function generateThumbnail(file, controller) {
+    return withDecodePermit(controller, () => generateThumbnailWithPermit(file, controller));
+  }
+  async function generateThumbnailWithPermit(file, controller) {
     const extension = C.extensionOf(file.name);
     if (C.VIDEO_EXTENSIONS.includes(extension)) {
       try {return await generateVideoThumbnail(file, controller);}
@@ -1015,10 +1066,11 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         const result = await decodePreview(file, 'thumbnail', controller, extension);
         return { ...result, mime: result.blob.type, bytes: new Uint8Array(await result.blob.arrayBuffer()) };
       } catch (error) {
-        if (error?.name === 'AbortError' || controller?.cancelled || ['tif', 'tiff', 'heic', 'heif', ...C.RAW_EXTENSIONS].includes(extension)) throw error;
+        if (error?.name === 'AbortError' || controller?.cancelled || error.code !== 'WORKER_FORMAT_UNSUPPORTED' || !['svg','ico'].includes(extension)) throw error;
         // Some browsers support SVG/ICO through <img> but not createImageBitmap.
       }
     }
+    await C.checkPreviewInput(file, extension);
     const sourceUrl = URL.createObjectURL(extension === 'svg' ? new Blob([file], { type: 'image/svg+xml' }) : file),img = new Image();
     try {
       throwIfPreviewCancelled(controller);
@@ -2542,6 +2594,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       toast('Finish the active operation before opening maintenance.', true);return;
     }
     if (!db) return;
+    $('#auto-save-minutes').value = String(ws.preferences.autoSaveMinutes || 1);
     $('#evidence-database-limit').value = String(evidenceDatabaseLimitGb());
     agedPreviewKeys = [];
     lastMaintenancePlan = null;
@@ -2742,8 +2795,52 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     return { key, decision: protectedMetadata ? { ...protectedMetadata.decision, key, status: 'EVIDENCE', reviewedAt: d.reviewedAt } : d,
       content: protectedMetadata?.content || (await ws.contents[d.hash]), occurrences };
   }
-  async function cards() {
-    return (await MediaDatabase.arrayMap((await db.exec("SELECT id FROM catalog_records WHERE kind='decisions'"))[0]?.values || [], async (row) => await cardForKey(row[0]))).filter(Boolean);
+  function captureOccurrenceFilter() {
+    return {extensions:[...ws.preferences.visibleExtensions],search:$('#search').value.trim().toLowerCase(),
+      missingSource:$('#source-filter').checked,missingPreview:$('#preview-filter').checked,
+      roots:[...directoryHandleByRoot.keys()],sources:[...fileByOccurrence.keys()]};
+  }
+  function occurrenceQueryPredicate(filter) {
+    const params = [],where = ["o.kind='occurrences'",'o.root_id=d.root_id','o.hash=d.hash',"COALESCE(json_extract(o.row_json,'$.supersededAt'),'')=''"];
+    if (!filter.extensions.length) where.push('0');
+    else {where.push('o.extension IN (' + filter.extensions.map(() => '?').join(',') + ')');params.push(...filter.extensions);}
+    if(filter.search){where.push("instr(lower(o.name||' '||o.path||' '||o.hash||' '||COALESCE(json_extract(d.row_json,'$.notes'),'')),?)>0");params.push(filter.search);}
+    if(filter.missingSource){
+      if(filter.roots.length){where.push('o.root_id NOT IN (SELECT value FROM json_each(?))');params.push(JSON.stringify(filter.roots));}
+      if(filter.sources.length){where.push('o.id NOT IN (SELECT value FROM json_each(?))');params.push(JSON.stringify(filter.sources));}
+    }
+    if(filter.missingPreview)where.push('NOT EXISTS (SELECT 1 FROM thumbnails t WHERE t.hash=o.hash)');
+    return {sql:where.join(' AND '),params};
+  }
+  async function cardSummary(key, filter, previousId) {
+    const decision = await ws.decisions[key];if(!decision)return null;
+    const protectedMetadata = decision.status === 'EVIDENCE' ? evidenceMetadataCache.get(key) : null;
+    if(protectedMetadata){const occurrences=protectedMetadata.occurrences.slice(0,1);return {key,decision:{...protectedMetadata.decision,key,status:'EVIDENCE',reviewedAt:decision.reviewedAt},content:protectedMetadata.content,occurrences,matchingOccurrences:occurrences,occurrenceCount:protectedMetadata.occurrences.length,summary:true};}
+    const predicate = occurrenceQueryPredicate(filter);
+    const active = "o.kind='occurrences' AND o.root_id=d.root_id AND o.hash=d.hash AND COALESCE(json_extract(o.row_json,'$.supersededAt'),'')=''";
+    const sql="SELECT o.row_json FROM catalog_records o JOIN catalog_records d ON d.kind='decisions' AND d.id=? WHERE "+(decision.status==='EVIDENCE'?active:predicate.sql),params=[key,...(decision.status==='EVIDENCE'?[]:predicate.params)];
+    let row=previousId?(await db.exec(sql+' AND o.id=? LIMIT 1',[...params,previousId]))[0]?.values[0]:null;
+    if(!row)row=(await db.exec(sql+' ORDER BY o.path,o.id LIMIT 1',params))[0]?.values[0];
+    if(!row)return null;
+    const occurrences=[JSON.parse(row[0])],count=Number((await db.exec("SELECT COUNT(*) FROM catalog_records WHERE kind='occurrences' AND root_id=? AND hash=? AND COALESCE(json_extract(row_json,'$.supersededAt'),'')=''",[decision.rootId,decision.hash]))[0]?.values[0][0]||0);
+    return {key,decision,content:await ws.contents[decision.hash],occurrences,matchingOccurrences:occurrences,occurrenceCount:count,summary:true};
+  }
+  async function renderLocationPage(card, token, cursor = null, protectedOffset = 0) {
+    const host=$('#locations'),generation=databaseGeneration;
+    const metadata=card.decision.status==='EVIDENCE'?evidenceMetadataCache.get(card.key):null;
+    let occurrences;
+    if(metadata)occurrences=metadata.occurrences.slice(protectedOffset,protectedOffset+101);
+    else {
+      const params=[card.decision.rootId,card.decision.hash];
+      let after='';if(cursor){after=' AND (path>? OR (path=? AND id>?))';params.push(cursor.path,cursor.path,cursor.id);}
+      const rows=(await db.exec("SELECT row_json FROM catalog_records WHERE kind='occurrences' AND root_id=? AND hash=? AND COALESCE(json_extract(row_json,'$.supersededAt'),'')=''"+after+' ORDER BY path,id LIMIT 101',params))[0]?.values||[];
+      occurrences=rows.map(row=>JSON.parse(row[0]));
+    }
+    if(token!==inspectRenderToken||generation!==databaseGeneration)return;
+    host.replaceChildren();
+    for(const x of occurrences.slice(0,100)){const p=document.createElement('p');p.textContent=x.path+(fileByOccurrence.has(x.id)||directoryHandleByRoot.has(x.rootId)?' · connected':' · unavailable');host.append(p);}
+    if(cursor||protectedOffset){const first=document.createElement('button');first.textContent='First 100 locations';first.onclick=()=>renderLocationPage(card,token).catch(error=>toast(error.message,true));host.append(first);}
+    if(occurrences.length>100){const next=document.createElement('button');next.textContent='Next 100 locations';next.onclick=()=>renderLocationPage(card,token,occurrences[99],protectedOffset+100).catch(error=>toast(error.message,true));host.append(next);}
   }
   function buildCardQuery(bucket, filtered = true, limit = null, offset = 0, countOnly = false, candidates = null, excluded = []) {
     const params = [bucket],where = ["d.kind='decisions'", "d.status=?"];
@@ -2752,16 +2849,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       if (!exts.length) return { empty: true, countOnly };
       const root = $('#root-filter').value,q = $('#search').value.trim().toLowerCase();
       if (root) {where.push('d.root_id=?');params.push(root);}
-      let matching = "o.kind='occurrences' AND o.root_id=d.root_id AND o.hash=d.hash AND COALESCE(json_extract(o.row_json,'$.supersededAt'),'')=''";
-      matching += ' AND o.extension IN (' + exts.map(() => '?').join(',') + ')';params.push(...exts);
-      if (q) {matching += " AND (instr(lower(o.name||' '||o.path||' '||o.hash||' '||COALESCE(json_extract(d.row_json,'$.notes'),'')),?)>0)";params.push(q);}
-      if ($('#source-filter').checked) {
-        const roots = [...directoryHandleByRoot.keys()];
-        if (roots.length) {matching += ' AND o.root_id NOT IN (SELECT value FROM json_each(?))';params.push(JSON.stringify(roots));}
-        const sources = [...fileByOccurrence.keys()];
-        if (sources.length) {matching += ' AND o.id NOT IN (SELECT value FROM json_each(?))';params.push(JSON.stringify(sources));}
-      }
-      if ($('#preview-filter').checked) {matching += ' AND NOT EXISTS (SELECT 1 FROM thumbnails t WHERE t.hash=o.hash)';}
+      const predicate = occurrenceQueryPredicate(captureOccurrenceFilter());
+      const matching = predicate.sql;params.push(...predicate.params);
       where.push("(d.status='EVIDENCE' OR EXISTS(SELECT 1 FROM catalog_records o WHERE " + matching + '))');
     }
     if (candidates) {
@@ -2788,56 +2877,16 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     const rows = (await databaseClient.query(query.sql, query.params))[0]?.values || [];
     return query.countOnly ? Number(rows[0]?.[0] || 0) : rows.map((row) => row[0]);
   }
-  async function occurrencePredicate(o) {
-    const root = $('#root-filter').value;
-    if (root && o.rootId !== root) return false;
-    const q = $('#search').value.trim().toLowerCase();
-    if (q) {
-      const d = await ws.decisions[o.rootId + '|' + o.hash];
-      const hay = [o.name, o.path, o.hash, d?.notes].join(' ').toLowerCase();
-      if (!hay.includes(q)) return false;
-    }
-    if ($('#source-filter').checked && (
-    fileByOccurrence.has(o.id) || directoryHandleByRoot.has(o.rootId))) return false;
-    if ($('#preview-filter').checked && (await hasThumbnail(o.hash))) return false;
-    return true;
-  }
-  function cardMatchesFilters(card) {
-    if (card.decision.status === 'EVIDENCE' && !evidenceMetadataCache.has(card.key)) return true;
-    return C.isContentVisible({
-      occurrences: card.occurrences
-    },
-    ws.preferences.visibleExtensions, occurrencePredicate);
-  }
-  async function filteredCards(bucket = activeBucket, sourceCards) {
-    sourceCards = sourceCards || (await cards());
-    const list = sourceCards.filter((card) => card.decision.status === bucket &&
-    cardMatchesFilters(card));
-    const sort = $('#sort').value;
-    list.sort((a, b) => {
-      const ao = matchingFor(a)[0] || a.occurrences[0],bo = matchingFor(b)[0] || b.occurrences[0];
-      if (sort !== 'review-desc') return C.compareOccurrences(ao, bo, sort, ws.scans);
-      return String(b.decision.reviewedAt || b.content?.lastSeen || '').localeCompare(String(a.
-      decision.reviewedAt || a.content?.lastSeen || ''));
-    }
-    );
-    return list;
-  }
   function matchingFor(card) {
-    return C.matchingOccurrences({
-      occurrences: card.occurrences
-    },
-    ws.preferences.visibleExtensions, occurrencePredicate);
+    // Grid summaries already contain a representative selected by the SQL filter.
+    return card.matchingOccurrences || card.occurrences;
   }
   function previewOccurrence(card) {
-    const connected = (o) => fileByOccurrence.has(o.id) || directoryHandleByRoot.has(o.rootId);
-    return matchingFor(card).find((o) => connected(o) && C.PREVIEW_EXTENSIONS.includes(o.
-    extension)) || card.occurrences.find((o) => connected(o) && C.PREVIEW_EXTENSIONS.
-    includes(o.extension));
+    return matchingFor(card).find(o => (fileByOccurrence.has(o.id) || directoryHandleByRoot.has(o.rootId)) && C.PREVIEW_EXTENSIONS.includes(o.extension));
   }
   let pageTotal = 0,gridPointerActive = false,interactionUntil = 0;
   async function readCounts() {
-    const totals = new Map((await databaseClient.query("SELECT status,COUNT(*) FROM catalog_records WHERE kind='decisions' GROUP BY status"))[0]?.values || []);
+    const totals = await catalogTotals();
     const filtered = $('#root-filter').value || $('#search').value.trim() || $('#source-filter').checked || $('#preview-filter').checked || ws.preferences.visibleExtensions.size !== C.ALL_EXTENSIONS.length;
     const counts = [];
     for (const status of C.STATUSES) {
@@ -2877,7 +2926,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     node.querySelector('.card-check').setAttribute('aria-label', 'Select ' + occurrence.name);
     const image = node.querySelector('img');if (image) image.alt = 'Preview of ' + occurrence.name;
     node.querySelector('.badge').textContent = (C.mediaKindForExtension(occurrence.extension) === 'video' ? '▶ ' : '') + occurrence.extension.toUpperCase();
-    node.querySelector('.card-locations').textContent = `${card.occurrences.length} location${card.occurrences.length === 1 ? '' : 's'}` + (contentHashMethod(card.content, card.decision.hash) === 'sampled-sha256-v1' ? ' · Quick fingerprint' : '');
+    node.querySelector('.card-locations').textContent = `${card.occurrenceCount ?? card.occurrences.length} location${(card.occurrenceCount ?? card.occurrences.length) === 1 ? '' : 's'}` + (contentHashMethod(card.content, card.decision.hash) === 'sampled-sha256-v1' ? ' · Quick fingerprint' : '');
   }
   function gridQuerySignature() {return JSON.stringify([databaseGeneration, activeBucket, page, pageSize, $('#root-filter').value, $('#search').value, $('#source-filter').checked, $('#preview-filter').checked, $('#sort').value, [...ws.preferences.visibleExtensions]]);}
   async function renderResults(deferInteraction = false, preservePage = deferInteraction && Boolean(scanController)) {
@@ -2922,7 +2971,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     if (evidenceOperationInFlight) {scheduleLiveResults();return;}
     if (deferInteraction && (gridPointerActive || Date.now() < interactionUntil || $('#inspect-dialog').open)) {scheduleLiveResults();return;}
     const reuseCards = keepCurrentPage && !deferInteraction,cached = new Map(visibleCards.map(card => [card.key, card]));
-    const slice = (await MediaDatabase.arrayMap(keys, async key => reuseCards && cached.get(key) || await cardForKey(key))).filter(Boolean);
+    const occurrenceFilter=captureOccurrenceFilter();
+    const slice = (await MediaDatabase.arrayMap(keys, async key => reuseCards && cached.get(key) || await cardSummary(key,occurrenceFilter,keepCurrentPage?cached.get(key)?.occurrences[0]?.id:null))).filter(Boolean);
     if (reviewWriteInFlight || revision !== reviewRevision || signature !== gridQuerySignature()) {gridQueryAgain = true;return;}
     const grid = $('#results');
     const nodes = new Map([...grid.querySelectorAll('.card')].map((node) => [node.dataset.key, node]));
@@ -2970,7 +3020,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     patchSelection();
   }
   async function queueMissingPreviews(cardsToShow) {
-    if (scanController || evidenceOperationInFlight) return;
+    if (scanController || evidenceOperationInFlight || reportExportActive) return;
     const hashes = new Set(cardsToShow.filter((card) => card.decision.status !== 'EVIDENCE').map((card) => card.decision.hash));
     for (const hash of previewRecoveryAttempted) if (!hashes.has(hash)) previewRecoveryAttempted.delete(hash);
     for (let index = previewRecoveryQueue.length - 1; index >= 0; index--) if (!hashes.has(previewRecoveryQueue[index].hash)) previewRecoveryQueue.splice(index, 1);
@@ -2987,11 +3037,11 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     if (!previewRecoveryBusy) recoverNextPreview().catch((error) => console.warn('Preview recovery stopped:', error));
   }
   async function recoverNextPreview() {
-    if (previewRecoveryBusy || evidenceOperationInFlight) return;
+    if (previewRecoveryBusy || evidenceOperationInFlight || reportExportActive) return;
     previewRecoveryBusy = true;
     let failed = 0;
     try {
-      while (previewRecoveryQueue.length && !scanController && !evidenceOperationInFlight) {
+      while (previewRecoveryQueue.length && !scanController && !evidenceOperationInFlight && !reportExportActive) {
         const occurrence = previewRecoveryQueue.shift();
         if (!(await ws.occurrences[occurrence.id]) || (await hasThumbnail(occurrence.hash))) continue;
         await previewRecoveryAttempted.add(occurrence.hash);
@@ -3110,7 +3160,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     foot.className = 'card-foot';
     const count = document.createElement('span');
     count.className = 'tiny muted grow card-locations';
-    count.textContent = `${card.occurrences.length} location${card.occurrences.length === 1 ? '' : 's'}` + (
+    count.textContent = `${card.occurrenceCount ?? card.occurrences.length} location${(card.occurrenceCount ?? card.occurrences.length) === 1 ? '' : 's'}` + (
     contentHashMethod(card.content, card.decision.hash) === 'sampled-sha256-v1' ?
     ' · Quick fingerprint' : '');
 
@@ -3365,6 +3415,9 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     });
   }
   function scanImagePreview(file, controller) {
+    return withDecodePermit(controller, () => scanImagePreviewWithPermit(file, controller));
+  }
+  function scanImagePreviewWithPermit(file, controller) {
     if (controller.cancelled) return Promise.reject(previewAbortError());
     const worker = controller.worker ||= workerClient(true),jobId = C.cryptoRandom(),generation = databaseGeneration;
     return new Promise((resolve,reject) => {
@@ -3376,8 +3429,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       };
       const stop = error => {worker.terminate();if(controller.worker === worker)controller.worker = null;finish(error);};
       const failure = event => stop(new Error(event.message || 'Preview worker failed.'));
-      const message = event => {const value=event.data;if(value.jobId!==jobId)return;if(controller.cancelled||generation!==databaseGeneration){stop(previewAbortError());return;}finish(value.error?new Error(value.error):null,value.result);};
-      const timer = setTimeout(()=>stop(new Error('Preview timed out; decoding worker was stopped.')),15000),cancelTimer=setInterval(()=>{if(controller.cancelled||generation!==databaseGeneration)stop(previewAbortError());},100);
+      const message = event => {const value=event.data;if(value.jobId!==jobId)return;if(controller.cancelled||generation!==databaseGeneration){stop(previewAbortError());return;}finish(value.error?decodeError(value.error):null,value.result);};
+      const timer = setTimeout(()=>stop(Object.assign(new Error('Preview timed out; decoding worker was stopped.'), {code:'DECODE_TIMEOUT'})),15000),cancelTimer=setInterval(()=>{if(controller.cancelled||generation!==databaseGeneration)stop(previewAbortError());},100);
       controller.cancelCurrent = () => stop(previewAbortError());
       worker.addEventListener('message',message);worker.addEventListener('error',failure);worker.addEventListener('messageerror',failure);
       try {worker.postMessage({type:'scan-preview',file,extension:C.extensionOf(file.name),purpose:'thumbnail',jobId,generation});}catch(error){stop(error);}
@@ -3830,6 +3883,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   async function startScan(entries, options = {
   })
   {
+    if(reportExportActive)throw new Error('Wait for report export to finish.');
     const scanConfig = options.scanConfig || currentScanConfig(options.rootName || ''),
       included = scanConfig.extensions,streaming = typeof entries === 'function',
       batchEntries = streaming ? null : [...entries];
@@ -3956,7 +4010,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       // Capture checkpoint metadata between publications; worker tasks never access the database.
       const completed=checkpoint?.state==='complete',savedSignature=checkpoint?.signature;
       const promise=(async()=>{
-        let file,digest,generated,phase='read';
+        let file,digest,generated,previewFailure,phase='read';
         try {
           if(scanConfig.scanArchives&&C.extensionOf(entry.name)==='zip')return {controller:lane};
           file=await scanRetry(()=>boundedScanRead(entry.getFile(),lane,'Opening media file'),lane,'Opening '+entry.relativePath);
@@ -3972,9 +4026,9 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           const extension=C.extensionOf(file.name);
           if(C.PREVIEW_EXTENSIONS.includes(extension)&&!C.VIDEO_EXTENSIONS.includes(extension)&&!C.RAW_EXTENSIONS.includes(extension)&&!['tif','tiff','heic','heif'].includes(extension)) {
             try {const result=await scanImagePreview(file,lane);generated={...result,mime:result.blob.type,bytes:new Uint8Array(await result.blob.arrayBuffer())};}
-            catch(error){if(error.name==='AbortError')throw error;/* Publication retains the normal decoder fallback. */}
+            catch(error){if(error.name==='AbortError')throw error;previewFailure=error;}
           }
-          return {file,digest,generated,controller:lane};
+          return {file,digest,generated,previewFailure,controller:lane};
         }catch(error){return {file,digest,generated,error,phase,controller:lane};}
       })();
       return {promise,controller:lane};
@@ -4256,6 +4310,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           if (C.PREVIEW_EXTENSIONS.includes(ext) && !(await hasThumbnail(hash))) {
             try {
               setScanStatus(`Creating saved preview for ${position}:`, rel);
+              if (prepared?.previewFailure && !(prepared.previewFailure.code === 'WORKER_FORMAT_UNSUPPORTED' && ['svg','ico'].includes(ext))) throw prepared.previewFailure;
               const generated = prepared?.generated || await generateThumbnail(file, controller);
               throwIfPreviewCancelled(controller);
               if (generated) {
@@ -4407,6 +4462,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     if (box.bottom < 0 || !visibleCards.length && box.top < 0) grid.scrollIntoView({block:'start'});
   }
   async function assign(keys, status, notes) {
+    if(reportExportActive){toast('Wait for report export to finish.',true);return;}
     if (evidenceOperationInFlight) {toast('Wait for the active Evidence operation to finish.', true);return;}
     const database = db,workspace = ws,eventCount = ws.events.length;
     const bulkId = keys.length > 1 ? C.cryptoRandom() : null,now = new Date().toISOString();
@@ -4438,7 +4494,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       showResultsLoading();patchSelection();
     }
     logActivity('info',keys.length + ' item' + (keys.length === 1 ? '' : 's') + ' moved to ' + ({TO_REVIEW:'To review',COMPLIANT:'Compliant',NON_COMPLIANT:'Non-compliant',EVIDENCE:'Evidence'}[status] || status));
-    await setDirty();await renderResults(false, true);
+    catalogTotalsCache = null;await setDirty();await renderResults(false, true);
     if ($('#inspect-dialog').open && inspectIndex >= 0) await renderInspector();
   }
   async function verifyInspectorFullHash() {
@@ -4460,8 +4516,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       const fullSha256 = await hashEvidenceFile(file);
       if (ws.id !== workspaceId || db !== database || !(await ws.decisions[key])) throw new Error(
         'The database changed before verification completed.');
-      const verified = await splitVerifiedOccurrence(card, source, fullSha256);
-      visibleCards[inspectIndex] = verified;
+      const verified = await splitVerifiedOccurrence(await cardForKey(card.key), source, fullSha256);
+      visibleCards[inspectIndex] = await cardSummary(verified.key,captureOccurrenceFilter()) || verified;
       (await ws.occurrences[verified.occurrences[0].id]).fullHashVerifiedAt = new Date().toISOString();
       await setDirty();
       await renderInspector();
@@ -4476,7 +4532,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   async function openInspector(key) {
     inspectIndex = visibleCards.findIndex((c) => c.key === key);
-    if (inspectIndex < 0) {const card = await cardForKey(key);if (!card) return;visibleCards = [card];inspectIndex = 0;}
+    if (inspectIndex < 0) {const card = await cardSummary(key,captureOccurrenceFilter());if (!card) return;visibleCards = [card];inspectIndex = 0;}
     $('#inspect-dialog').showModal();
     zoom = 'fit';
     await renderInspector();
@@ -4790,16 +4846,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       dl.append(dt, dd);
     }
     );
-    const loc = $('#locations');
-    loc.innerHTML = '';
-    card.occurrences.forEach((x) => {
-      const p = document.createElement('p');
-      p.textContent =
-      `${x.path}${fileByOccurrence.has(x.id) || directoryHandleByRoot.has(x.rootId) ?
-      ' · connected' : persistedFileUrl(x) ? ' · saved location' : ' · unavailable'}`;
-      loc.append(p);
-    }
-    );
+    await renderLocationPage(card,token);
+    if(token !== inspectRenderToken)return;
     if (mediaKind === 'video') {
       const showPoster = async (reason) => {
         if (token !== inspectRenderToken) return;
@@ -4912,11 +4960,11 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       await reveal();
     };
 
-    const showOriginal = async (url, label, isObjectUrl) => {
+    const showOriginal = async (url, label, isObjectUrl, sourceDimensions = null) => {
       if (isObjectUrl) inspectUrl = url;
       img.onload = () => {
         if (token !== inspectRenderToken) return;
-        o.sourceDimensions = `${img.naturalWidth} × ${img.naturalHeight}`;
+        o.sourceDimensions = sourceDimensions || `${img.naturalWidth} × ${img.naturalHeight}`;
         setMetadataValue('Preview source', label);
         setMetadataValue('Dimensions', o.sourceDimensions);
         applyZoom();
@@ -4949,9 +4997,10 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           const display = await formatDisplayBlob(file, o.extension);
           if (token !== inspectRenderToken) return;
           await showOriginal(URL.createObjectURL(display.blob),
-          C.RAW_EXTENSIONS.includes(o.extension) ? 'Camera preview · decoded offline' : 'Original image · decoded offline', true);
+          C.RAW_EXTENSIONS.includes(o.extension) ? 'Camera preview · decoded offline' : 'Inspection preview · up to 2048 pixels', true, `${display.sourceWidth} × ${display.sourceHeight}`);
           return;
         }
+        await C.checkPreviewInput(file,o.extension);
         await showOriginal(URL.createObjectURL(o.extension === 'svg' ? new Blob([file], { type: 'image/svg+xml' }) : file),
         'Original source · folder reconnected', true);
       }
@@ -4986,48 +5035,64 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     applyZoom();
   }
   async function exportReport() {
-    const evidenceCount = (await cards()).filter((c) => c.decision.status === 'EVIDENCE').length;
-    let includeEvidence = false;
-    if (evidenceCount) includeEvidence = confirm([
-    `Include ${evidenceCount} Evidence item${evidenceCount === 1 ? '' : 's'} in the CSV?`,
-    'OK includes Evidence and may ask for the password.',
-    'Cancel exports Non-compliant items only.'].
-    join('\n\n'));
-    if (includeEvidence && !(await ensureVaultUnlocked())) {
-      toast('Report export cancelled because Evidence remains locked.', true);
-      return;
-    }
-    const includedStatuses = new Set(C.reportStatuses(includeEvidence));
-    const rows = [['Status', 'Hash method', 'Hash value', 'Full SHA-256', 'Root',
-    'Relative path', 'Display path',
-    'Media kind', 'Extension', 'Duration seconds', 'Size', 'Last modified',
-    'Archive path', 'Archive member', 'Original connected', 'Reviewed UTC', 'Reviewer',
-    'Notes', 'Last scan ID']];
-    await MediaDatabase.arrayForEach((await cards()).filter((c) => includedStatuses.has(c.decision.status)), async (c) => await MediaDatabase.arrayForEach(c.occurrences, async (o) =>
-    {
-      const r = ws.roots[o.rootId] || {
-        },
-        method = contentHashMethod(c.content, c.decision.hash),record =
-        c.decision.status === 'EVIDENCE' ? await getEvidenceRecord(c.key) : null,
-        hashValue = method === 'sampled-sha256-v1' ? c.content?.sampleDigest || o.hash : o.hash,
-        fullSha256 = record?.hash || c.content?.fullSha256 || (
-        method === 'sha256' ? o.hash : '');
-      rows.push([c.decision.status, hashMethodLabel(c.content, c.decision.hash),
-      hashValue, fullSha256, r.label, o.path, joinDisplayPath(r,
-      o.path), C.mediaKindForExtension(o.extension), o.extension, o.duration ?? '', o.size,
-      o.lastModified ? new Date(o.lastModified).toISOString() : '', o.archivePath || '',
-      o.archiveEntry || '', fileByOccurrence.has(o.id) ||
-      directoryHandleByRoot.has(o.rootId) ? 'Yes' : 'No',
-      c.decision.reviewedAt || '', c.decision.reviewer || '',
-      c.decision.notes || '', o.lastScanId || '']);
-    }
-    ));
-    download(new Blob([C.toCsv(rows)], {
-      type: 'text/csv;charset=utf-8'
-    }
-    ), includeEvidence ? 'non-compliant-and-evidence-report.csv' : 'non-compliant-report.csv');
-    toast(includeEvidence ? 'Report export generated with Evidence.' :
-    'Non-compliant report export generated.');
+    if (scanController || evidenceOperationInFlight || reviewWriteInFlight || reportExportActive) {toast('Finish or cancel the current scan or write before exporting a report.',true);return;}
+    const database=db,generation=databaseGeneration;
+    let destination,writable,dialog,transaction,parts=[],partBytes=0,partNumber=1,exported=0,cancelled=false,temporaryVault=false;
+    const current=()=>{if(cancelled)throw previewAbortError();if(database!==db||generation!==databaseGeneration)throw new Error('Database changed during report export.');};
+    const downloadPart=()=>{if(!parts.length)return;download(new Blob(parts,{type:'text/csv;charset=utf-8'}),'media-report-part-'+(partNumber++)+'.csv');parts=[];partBytes=0;};
+    try {
+      // Request the picker before database awaits consume the browser's user activation.
+      if(window.showSaveFilePicker)destination=await window.showSaveFilePicker({suggestedName:'media-review-report.csv',types:[{description:'CSV report',accept:{'text/csv':['.csv']}}]});
+      current();
+      if(scanController||evidenceOperationInFlight||reviewWriteInFlight)throw new Error('A scan or write started while choosing the report destination.');
+      reportExportActive=true;
+      dialog=document.createElement('dialog');const title=document.createElement('h2'),status=document.createElement('p'),cancel=document.createElement('button');
+      title.textContent='Exporting report';status.textContent='Preparing report…';cancel.textContent='Cancel';cancel.onclick=()=>{cancelled=true;cancel.disabled=true;status.textContent='Cancelling…';};
+      dialog.addEventListener('cancel',event=>{event.preventDefault();cancelled=true;});dialog.append(title,status,cancel);document.body.append(dialog);dialog.showModal();
+      const evidenceCount=Number((await database.exec("SELECT COUNT(*) FROM catalog_records WHERE kind='decisions' AND status='EVIDENCE'"))[0]?.values[0][0]||0);
+      const includeEvidence=evidenceCount?confirm(`Include ${evidenceCount} Evidence items? OK includes Evidence and may ask for the password. Cancel exports Non-compliant items only.`):false;
+      // The password dialog uses the existing vault workflow; temporarily allow it.
+      if(includeEvidence){temporaryVault=!vaultKey;reportExportActive=false;try{if(!(await ensureVaultUnlocked({migrateLegacy:false})))throw previewAbortError();}finally{reportExportActive=true;}}
+      current();
+      if(scanController||evidenceOperationInFlight||reviewWriteInFlight)throw new Error('Wait for the active write before exporting.');
+      const statuses=C.reportStatuses(includeEvidence),placeholders=statuses.map(()=>'?').join(','),roots=structuredClone(ws.roots),reviewer=ws.reviewer;
+      const header=['Status','Hash method','Hash value','Full SHA-256','Root','Relative path','Display path','Media kind','Extension','Duration seconds','Size','Last modified','Archive path','Archive member','Original connected','Reviewed UTC','Reviewer','Notes','Last scan ID'];
+      const encoder=new TextEncoder(),headerBytes=encoder.encode(C.toCsv([header]));
+      if(destination)writable=await destination.createWritable();
+      const write=async rows=>{
+        current();const bytes=encoder.encode(C.toCsv(rows));
+        if(writable)await writable.write(bytes);
+        else {if(partBytes&&partBytes+bytes.length>8*1024*1024){downloadPart();parts.push(headerBytes);partBytes=headerBytes.length;}parts.push(bytes);partBytes+=bytes.length;}
+      };
+      await write([header]);
+      // No scan is active and the modal prevents review changes. The owned transaction
+      // also holds save/mutation boundaries until the bounded export finishes.
+      await database.run('BEGIN');transaction=database.transaction;
+      let lastDecision='';
+      for(;;){
+        current();const decisions=(await database.exec("SELECT id,row_json FROM catalog_records WHERE kind='decisions' AND status IN ("+placeholders+") AND id>? ORDER BY id LIMIT 32",[...statuses,lastDecision]))[0]?.values||[];
+        if(!decisions.length)break;
+        for(const [key,json] of decisions){
+          current();lastDecision=key;const decision=JSON.parse(json),record=decision.status==='EVIDENCE'?await getEvidenceRecord(key):null;
+          const metadata=decision.status==='EVIDENCE'?(evidenceMetadataCache.get(key)||await decryptEvidenceMetadata(vaultKey,record)):null;
+          const d=metadata?.decision||decision,content=metadata?.content||await ws.contents[decision.hash];
+          let cursor=null,protectedOffset=0;
+          for(;;){
+            const occurrences=metadata?metadata.occurrences.slice(protectedOffset,protectedOffset+128):((await database.exec("SELECT row_json FROM catalog_records WHERE kind='occurrences' AND root_id=? AND hash=? AND COALESCE(json_extract(row_json,'$.supersededAt'),'')=''"+(cursor?' AND (path>? OR (path=? AND id>?))':'')+' ORDER BY path,id LIMIT 128',[decision.rootId,decision.hash,...(cursor?[cursor.path,cursor.path,cursor.id]:[])]))[0]?.values||[]).map(row=>JSON.parse(row[0]));
+            if(!occurrences.length)break;
+            const rows=occurrences.map(o=>{const root=roots[o.rootId]||{},method=contentHashMethod(content,decision.hash);return [decision.status,hashMethodLabel(content,decision.hash),method==='sampled-sha256-v1'?content?.sampleDigest||o.hash:o.hash,record?.hash||content?.fullSha256||(method==='sha256'?o.hash:''),root.label,o.path,joinDisplayPath(root,o.path),C.mediaKindForExtension(o.extension),o.extension,o.duration??'',o.size,o.lastModified?new Date(o.lastModified).toISOString():'',o.archivePath||'',o.archiveEntry||'',fileByOccurrence.has(o.id)||directoryHandleByRoot.has(o.rootId)?'Yes':'No',decision.reviewedAt||'',decision.reviewer||d.reviewer||reviewer||'',d.notes||'',o.lastScanId||''];});
+            await write(rows);exported+=rows.length;status.textContent=`Exported ${exported} locations…`;cursor=occurrences.at(-1);protectedOffset+=occurrences.length;await yieldPaint();
+          }
+        }
+      }
+      await database.run('COMMIT');transaction=null;current();
+      if(writable)await writable.close();else downloadPart();
+      toast('Report exported: '+exported+' locations.');
+    } catch(error) {
+      if(transaction&&database.transaction===transaction)try{await database.run('ROLLBACK');}catch(rollbackError){logActivity('error','Report transaction could not close',rollbackError.message);}
+      try{await writable?.abort();}catch(_){}
+      if(error.name!=='AbortError')toast('Report export failed: '+error.message,true);
+    } finally {parts=[];dialog?.close();dialog?.remove();reportExportActive=false;if(temporaryVault&&vaultKey)await lockVault();scheduleAutoSave();scheduleRecovery();}
   }
   function evidenceExportHashStream(worker) {
     const jobId = C.cryptoRandom();
@@ -5342,7 +5407,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     await db.upgrade(MEDIA_DATABASE_SCHEMA);attachDatabaseClient(db);await installCatalog(ws);await initializePreviewBudget();
     dbSyncSnapshot = null;
     exportCache = null;
-    lastWorkspaceWriteAt = 0;
+    lastWorkspaceWriteAt = 0;lastRecoveryWriteAt=0;lastSnapshotDuration=0;lastSaveDuration=0;lastDatabaseBytes=0;
     workspaceFileHandle = handle;
     workspaceWritable = false;
     workspaceLoadedFromFile = true;
@@ -5473,7 +5538,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         'A queued database save was cancelled because another database is active.');
       await assertWorkspaceFileUnchanged(handle, async () => await exportWorkspaceBytes(), isCurrent);
       showOperation('Saving database', 'Preparing snapshot');await yieldPaint();
-      const revision = changeRevision,bytes = await exportWorkspaceBytes();
+      const saveStarted=Date.now(),revision = changeRevision,bytes = await exportWorkspaceBytes();
       let writable;
       try {
         if (!isCurrent()) throw new Error('Database changed during save.');
@@ -5485,6 +5550,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         }
         showOperation('Saving database', 'Finalizing');
         await writable.close();
+        if(recoveryEnabled){try{await MediaDatabase.rpc('recoveryPut',{token:bytes.token});lastRecoveryWriteAt=Date.now();}catch(error){logActivity('warning','Local recovery snapshot could not be retained',error.message);}}
       }
       catch (error) {
         try {
@@ -5501,12 +5567,12 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       workspaceFileVersions.set(handle,
       await workspaceFileVersion(await handle.getFile()));
       if (isCurrent()) {
-        lastWorkspaceWriteAt = Date.now();
+        lastWorkspaceWriteAt = Date.now();lastSaveDuration=Date.now()-saveStarted;
         await clearWorkspaceConflict();
         workspaceWritable = true;upgradePending = false;
         if (revision === changeRevision) dirty = false;
         autoSaveError = '';
-        await renderWorkspaceState();
+        requestWorkspaceState();
         if (!quiet) toast('Database saved. Automatic saves are now active.');
       }
       return bytes.size;
@@ -5594,6 +5660,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   ));
   $$('[data-review]').forEach((b) => b.addEventListener('click', async () => {
+    if(reportExportActive)return;
     const c = visibleCards[inspectIndex];
     if (!c) return;
     const status = b.dataset.review,notes = $('#review-notes').value;
@@ -5991,6 +6058,9 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   $('#save-log').addEventListener('click', () => {
     const url = URL.createObjectURL(new Blob([logText()],{type:'text/plain;charset=utf-8'})),link = document.createElement('a');
     link.href = url;link.download = 'media-reviewer-log-' + new Date().toISOString().slice(0,10) + '.txt';link.click();setTimeout(() => URL.revokeObjectURL(url),1000);
+  });
+  $('#auto-save-minutes').addEventListener('change', async event => {
+    ws.preferences.autoSaveMinutes=Number(event.target.value);clearTimeout(autoSaveTimer);autoSaveTimer=null;autoSaveDueAt=0;await setDirty();
   });
   $('#export-report').addEventListener('click', exportReport);
   $$('#export-evidence,[data-export-evidence]').forEach((button) => button.addEventListener('click', async () => await prepareEvidenceExport([...selected])));

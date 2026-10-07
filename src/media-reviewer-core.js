@@ -582,7 +582,7 @@
       planar = first(284, 1),orientation = first(274, 1),bits = tags.get(258) || [8],
       stripOffsets = tags.get(273) || [],stripCounts = tags.get(279) || [];
     const pixels = width * height;
-    if (!Number.isSafeInteger(pixels) || !width || !height || pixels > 40000000) throw new Error(
+    if (!Number.isSafeInteger(pixels) || !width || !height || pixels > 32000000) throw new Error(
       'The TIFF dimensions are invalid or exceed the safe display limit.');
     if (planar !== 1) throw new Error('Planar TIFF images are not supported.');
     if (!Number.isSafeInteger(samples) || samples < 1 || samples > 8 ||
@@ -922,7 +922,7 @@
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.0', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.1', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -939,7 +939,7 @@
         scanExtensions: new Set(ALL_EXTENSIONS), visibleExtensions: new Set(ALL_EXTENSIONS),
         scanMode: 'deep', scanArchives: false, workerCount: 4, excludeUserApplicationData: true, skipOlderYears: 0, quickVideoHash: true,
         quickVideoThresholdMiB: 1, thumbSize: 210, thumbnailFit: 'fit', itemsPerPage: 60,
-        evidenceDatabaseLimitGb: 2.5
+        evidenceDatabaseLimitGb: 2.5, autoSaveMinutes: 1
       }
     };
 
@@ -950,7 +950,7 @@
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.3.0', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.3.1', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -971,6 +971,7 @@
     obj.preferences.quickVideoHash = obj.preferences.quickVideoHash !== false;
     obj.preferences.quickVideoThresholdMiB = normalizeQuickVideoThresholdMiB(
       obj.preferences.quickVideoThresholdMiB);
+    obj.preferences.autoSaveMinutes = [1,5,15].includes(Number(obj.preferences.autoSaveMinutes)) ? Number(obj.preferences.autoSaveMinutes) : 1;
     obj.preferences.thumbSize = Number(obj.preferences.thumbSize) || 210;
     obj.preferences.thumbnailFit = obj.preferences.thumbnailFit === 'fill' ? 'fill' : 'fit';
     obj.preferences.itemsPerPage = normalizePageSize(obj.preferences.itemsPerPage);
@@ -1164,6 +1165,68 @@
     return { identityMigration, upgraded: version < DATABASE_SCHEMA_VERSION || identityMigration.changed > 0, sourceVersion: version || 1, targetVersion: DATABASE_SCHEMA_VERSION };
   }
 
+  function previewLimit(message) {return Object.assign(new Error(message), {code:'RESOURCE_LIMIT'});}
+  function checkPreviewDimensions(width, height) {
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || width * height > 32000000)
+      throw previewLimit('Image exceeds the 32 megapixel preview limit or has invalid dimensions.');
+  }
+  async function checkPreviewInput(file, extension) {
+    if (file.size > 128 * 1024 * 1024) throw previewLimit('Image preview input exceeds 128 MiB.');
+    // Inspect a bounded header before asking the browser to allocate decoded pixels.
+    const bytes = new Uint8Array(await file.slice(0, 256 * 1024).arrayBuffer()),v = new DataView(bytes.buffer);
+    const text = (at, length) => String.fromCharCode(...bytes.subarray(at, at + length));
+    let width, height;
+    if (bytes.length >= 24 && text(1,3) === 'PNG') {width=v.getUint32(16);height=v.getUint32(20);}
+    else if (bytes.length >= 10 && text(0,3) === 'GIF') {width=v.getUint16(6,true);height=v.getUint16(8,true);}
+    else if (bytes.length >= 26 && text(0,2) === 'BM') {
+      if(v.getUint32(14,true) === 12){width=v.getUint16(18,true);height=v.getUint16(20,true);}
+      else {width=v.getInt32(18,true);height=Math.abs(v.getInt32(22,true));}
+    } else if (bytes.length >= 4 && bytes[0] === 255 && bytes[1] === 216) {
+      let at=2;
+      while(at+4<=bytes.length) {
+        if(bytes[at++]!==255)break;while(bytes[at]===255)at++;
+        const marker=bytes[at++];if(marker===217||marker===218)break;
+        if(marker===1||(marker>=208&&marker<=215))continue;
+        if(at+2>bytes.length)break;const size=v.getUint16(at);if(size<2||at+size>bytes.length)break;
+        if([192,193,194,195,197,198,199,201,202,203,205,206,207].includes(marker)&&size>=7){height=v.getUint16(at+3);width=v.getUint16(at+5);break;}at+=size;
+      }
+    } else if (bytes.length >= 30 && text(0,4)==='RIFF' && text(8,4)==='WEBP') {
+      const kind=text(12,4);
+      if(kind==='VP8X'){width=1+bytes[24]+(bytes[25]<<8)+(bytes[26]<<16);height=1+bytes[27]+(bytes[28]<<8)+(bytes[29]<<16);}
+      else if(kind==='VP8 '&&bytes[23]===157&&bytes[24]===1&&bytes[25]===42){width=v.getUint16(26,true)&16383;height=v.getUint16(28,true)&16383;}
+      else if(kind==='VP8L'&&bytes[20]===47){width=1+(bytes[21]|((bytes[22]&63)<<8));height=1+((bytes[22]>>6)|(bytes[23]<<2)|((bytes[24]&15)<<10));}
+    }
+    if(width === undefined && extension === 'ico' && bytes.length>=6 && v.getUint16(0,true)===0 && v.getUint16(2,true)===1) {
+      const count=v.getUint16(4,true);if(count<1||count>256||6+count*16>bytes.length)throw previewLimit('Invalid icon image directory.');
+      for(let i=0;i<count;i++){const at=6+i*16,size=v.getUint32(at+8,true),offset=v.getUint32(at+12,true);if(offset+size>file.size||size<24)throw previewLimit('Invalid icon image entry.');
+        const entry=new Uint8Array(await file.slice(offset,offset+40).arrayBuffer()),iv=new DataView(entry.buffer);let w,h;
+        if(entry[0]===137&&entry[1]===80&&entry[2]===78&&entry[3]===71){w=iv.getUint32(16);h=iv.getUint32(20);}
+        else if(entry.length>=12&&iv.getUint32(0,true)>=40){w=iv.getInt32(4,true);h=Math.abs(iv.getInt32(8,true))/2;}
+        else throw previewLimit('Icon dimensions could not be read safely.');
+        checkPreviewDimensions(w,h);if(!width||w*h>width*height){width=w;height=h;}
+      }
+    }
+    if(width === undefined && ['avif','heic','heif'].includes(extension)) {
+      const walk=(start,end,depth)=>{if(depth>8)return;for(let at=start;at+8<=Math.min(end,bytes.length);){let size=v.getUint32(at),header=8;const kind=text(at+4,4);if(size===1){if(at+16>bytes.length)return;const large=v.getBigUint64(at+8);if(large>BigInt(Number.MAX_SAFE_INTEGER))return;size=Number(large);header=16;}if(size===0)size=end-at;if(size<header)return;
+        if(kind==='ispe'&&at+header+12<=bytes.length){const w=v.getUint32(at+header+4),h=v.getUint32(at+header+8);checkPreviewDimensions(w,h);if(!width||w*h>width*height){width=w;height=h;}}
+        if(['meta','iprp','ipco'].includes(kind))walk(at+header+(kind==='meta'?4:0),Math.min(end,at+size),depth+1);at+=size;
+      }};walk(0,file.size,0);
+    }
+    if(width === undefined && extension === 'svg') {
+      const root=/<svg\b[^>]*>/i.exec(new TextDecoder().decode(bytes))?.[0]||'';
+      const attr=name=>new RegExp('\\b'+name+'\\s*=\\s*["\']([^"\']+)["\']','i').exec(root)?.[1];
+      const dimension=value=>/^[0-9]+(?:\.[0-9]+)?(?:px)?$/.test(value||'')?Math.ceil(parseFloat(value)):null;
+      width=dimension(attr('width'));height=dimension(attr('height'));
+      if(!width||!height){const box=(attr('viewBox')||'').trim().split(/[\s,]+/).map(Number);if(box.length===4){width=Math.ceil(box[2]);height=Math.ceil(box[3]);}else {width=undefined;height=undefined;}}
+    }
+    if(width !== undefined) {checkPreviewDimensions(width,height);return {width,height};}
+    // Specialist codecs inspect their own dimensions before allocating RGBA.
+    // Do not let an unrecognized ordinary raster header bypass the pixel budget.
+    if(!['tif','tiff','heic','heif',...RAW_EXTENSIONS].includes(extension))
+      throw previewLimit('Preview dimensions could not be read safely from the image header.');
+    return null;
+  }
+
   g.ImageReviewerCore = {
     DATABASE_SCHEMA_VERSION, upgradeDatabase, scanJournal, recordStore, migrateQuickGroups,
     IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, ALL_EXTENSIONS, PREVIEW_EXTENSIONS,
@@ -1177,7 +1240,7 @@
     resumeFileMatches, latestIncompleteScan, abandonIncompleteScans, compareOccurrences,
     resolveRelativeFile, retryOperation, retryableError, retryDelay, zipCrc32, workspaceFileVersionsMatch, diffRowSnapshots,
     readZipDirectory,
-    readBoundedDecompression, extractZipEntry, decodeTiff,
+    readBoundedDecompression, extractZipEntry, decodeTiff, checkPreviewInput, checkPreviewDimensions,
     collectDirectoryEntries,
     encodeEvidencePlaintext, decodeEvidencePlaintext, purgePlan, agedPurgeKeys,
     maintenancePlan, evidenceExportName, writeVerifiedEvidence, toCsv,

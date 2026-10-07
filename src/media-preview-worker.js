@@ -36,7 +36,7 @@ async function rawBitmap(file){
   if(end){candidates.push({start,end});start=end-1;}
  }
  candidates.sort((a,b)=>(b.end-b.start)-(a.end-a.start));
- for(const {start,end} of candidates.slice(0,8))try{return await createImageBitmap(new Blob([bytes.subarray(start,end)],{type:'image/jpeg'}));}catch(_){}
+ for(const {start,end} of candidates.slice(0,8))try{const preview=new Blob([bytes.subarray(start,end)],{type:'image/jpeg'});await ImageReviewerCore.checkPreviewInput(preview,'jpg');return await createImageBitmap(preview);}catch(_){}
  throw Error('No readable embedded camera preview in this RAW file.');
 }
 self.onmessage=async e=>{
@@ -45,21 +45,21 @@ self.onmessage=async e=>{
   const extension=m.extension,limit=m.purpose==='inspect'?2048:256;
   if(ImageReviewerCore.VIDEO_EXTENSIONS.includes(extension))bitmap=await videoBitmap(m.file,limit);
   else{
-   if(m.file.size>128*1024*1024)throw Error('Image preview input exceeds the 128 MiB decode limit.');
+   const headerDimensions=await ImageReviewerCore.checkPreviewInput(m.file,extension);
    if(ImageReviewerCore.RAW_EXTENSIONS.includes(extension))bitmap=await rawBitmap(m.file);
    else if(['tif','tiff'].includes(extension))decoded=await ImageReviewerCore.decodeTiff(new Uint8Array(await m.file.arrayBuffer()));
    else if(['heic','heif'].includes(extension)){
-    try{bitmap=await createImageBitmap(m.file,{imageOrientation:'from-image'});}catch(_){
+    try{if(!headerDimensions)throw Error('Read dimensions with the HEIF decoder.');bitmap=await createImageBitmap(m.file,{imageOrientation:'from-image'});}catch(_){
      heifModule=heifModule||libheif();const decoder=new heifModule.HeifDecoder();images=decoder.decode(new Uint8Array(await m.file.arrayBuffer()));
      if(!images.length)throw Error('No readable primary image in HEIF.');
      const image=images.find(image=>typeof image.is_primary==='function'&&image.is_primary())||images[0],width=image.get_width(),height=image.get_height();
      if(!Number.isSafeInteger(width*height)||width<=0||height<=0||width*height>32000000)throw Error('Image exceeds the 32 megapixel decode limit.');
      const data=new Uint8ClampedArray(width*height*4),result=await new Promise((resolve,reject)=>image.display({data,width,height},result=>result?resolve(result):reject(Error('HEIF codec cannot decode this image.'))));decoded={rgba:result.data,width,height};
     }
-   }else bitmap=await createImageBitmap(m.file,{imageOrientation:'from-image'});
+   }else try{bitmap=await createImageBitmap(m.file,{imageOrientation:'from-image'});}catch(error){if(['svg','ico'].includes(extension))error.code='WORKER_FORMAT_UNSUPPORTED';throw error;}
   }
   const width=bitmap?.width||decoded.width,height=bitmap?.height||decoded.height;
-  if(width*height>32000000)throw Error('Image exceeds the 32 megapixel decode limit.');
+  ImageReviewerCore.checkPreviewDimensions(width,height);
   if(decoded)bitmap=await createImageBitmap(new ImageData(decoded.rgba,width,height));
   let blob,canvas;
   for(const max of (m.purpose==='inspect'?[limit]:[256,224,192,160])){
@@ -68,6 +68,6 @@ self.onmessage=async e=>{
   }
   if(m.purpose!=='inspect'&&blob.size>32768)throw Error('Preview exceeds storage size limit.');
   self.postMessage({jobId:m.jobId,generation:m.generation,result:{blob,width:canvas.width,height:canvas.height,sourceWidth:width,sourceHeight:height}});canvas.width=canvas.height=1;
- }catch(error){self.postMessage({jobId:m.jobId,generation:m.generation,error:String(error.message||error)});}
+ }catch(error){self.postMessage({jobId:m.jobId,generation:m.generation,error:{message:String(error.message||error),code:error.code||(/limit|too large|megapixel/i.test(error.message)?'RESOURCE_LIMIT':'DECODE_FAILED')}});}
  finally{bitmap?.close();decoded?.rgba.fill(0);for(const image of images)image.free?.();}
 };

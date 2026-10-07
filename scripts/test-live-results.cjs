@@ -5,7 +5,7 @@ const app = fs.readFileSync(path.join(__dirname, '../src/media-reviewer-app.js')
 const controls = { 'root-filter': { value: '' }, search: { value: '' }, 'source-filter': { checked: false }, 'preview-filter': { checked: false }, sort: { value: 'scan-asc' } };
 const context = { Set, Map, ws: { preferences: { visibleExtensions: new Set(['jpg']) } }, $: selector => controls[selector.slice(1)], directoryHandleByRoot: new Map(), fileByOccurrence: new Map() };
 vm.createContext(context);
-for (const name of ['retainLiveCardKeys', 'buildCardQuery']) {
+for (const name of ['retainLiveCardKeys', 'captureOccurrenceFilter', 'occurrenceQueryPredicate', 'buildCardQuery']) {
   const source = new RegExp('function ' + name + '\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}').exec(app);
   assert(source, name);vm.runInContext(source[0], context);
 }

@@ -5,7 +5,7 @@
  function localCall(method,args){
   if(waiting.length>=32)return Promise.reject(new Error('Database request queue is full. Retry when the current operation finishes.'));
   if(!worker){const url=URL.createObjectURL(new Blob([document.querySelector('#database-worker-source').textContent],{type:'text/javascript'}));worker=new Worker(url);URL.revokeObjectURL(url);
-   worker.onmessage=e=>{const item=pending.get(e.data.requestId);if(!item)return;pending.delete(e.data.requestId);inFlight--;e.data.error?item.reject(Object.assign(new Error(e.data.error),{name:e.data.errorName||'Error',retrySafe:e.data.retrySafe===true})):item.resolve(e.data.result);sendNext();};
+   worker.onmessage=e=>{if(e.data.progress){g.dispatchEvent?.(new CustomEvent('media-database-progress',{detail:e.data.progress}));return;}const item=pending.get(e.data.requestId);if(!item)return;pending.delete(e.data.requestId);inFlight--;e.data.error?item.reject(Object.assign(new Error(e.data.error),{name:e.data.errorName||'Error',retrySafe:e.data.retrySafe===true})):item.resolve(e.data.result);sendNext();};
    worker.onerror=e=>{for(const item of [...pending.values(),...waiting])item.reject(new Error(e.message||'Database worker failed.'));pending.clear();waiting.length=0;inFlight=0;worker.terminate();worker=null;};
   }
   return new Promise((resolve,reject)=>{waiting.push({requestId:++sequence,method,args,resolve,reject});sendNext();});
@@ -59,7 +59,7 @@
   async exec(sql,params=[]){await this.flush();sql=String(sql);return this.retry('query',{id:this.id,sql,params,token:this.transaction?.token},()=>/^\s*SELECT\b/i.test(sql));}
   prepare(sql){let params=[],cursor=null,row=null;const free=async()=>{if(cursor){const value=cursor;cursor=null;await rpc('cursorFree',{cursor:value});}row=null;};return{bind(value){if(cursor)throw new Error('Finish the previous query before rebinding.');params=value;},run:async value=>{await free();await this.run(sql,value||params);},step:async()=>{await this.flush();if(!cursor)cursor=await rpc('cursorOpen',{id:this.id,sql,params,token:this.transaction?.token});row=await rpc('cursorStep',{cursor});return row!==null;},get:()=>row,free};}
   async upgrade(schema){await this.idle();return rpc('upgrade',{id:this.id,schema});}
-  async exportBlob(){return this.boundary(async()=>{await this.idle();return new Snapshot(await this.retry('snapshot',{id:this.id},()=>true));});}
+  async exportBlob(){return this.boundary(async()=>{await this.idle();return new Snapshot(await this.retry('snapshot',{id:this.id},error=>error.retrySafe===true));});}
   async close(){if(this.closed)return;if(this.transaction)await this.run('ROLLBACK');try{await this.flush();}catch(_){}await rpc('close',{id:this.id});this.closed=true;}
  }
  async function recordStore(database,kind,limit=256){

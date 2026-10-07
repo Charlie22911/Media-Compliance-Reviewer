@@ -3,7 +3,8 @@ import * as SQLite from '../vendor/wa-sqlite/src/sqlite-api.js';
 import {IDBBatchAtomicVFS} from '../vendor/wa-sqlite/src/examples/IDBBatchAtomicVFS.js';
 
 const STORAGE='photo-audit-sqlite-pages-v1',CHUNK=1024*1024;
-let engine,sqlite,vfs,storage,chain=Promise.resolve();
+let engine,sqlite,vfs,storage,chain=Promise.resolve(),activeRequestId=null,lastProgressAt=0;
+function progress(phase,done=0,total=0,force=false){const now=Date.now();if(!force&&now-lastProgressAt<250)return;lastProgressAt=now;self.postMessage({requestId:activeRequestId,progress:{phase,done,total}});}
 const sessionId=crypto.randomUUID(),sessionLock='photo-audit-database-session:'+sessionId;
 let releaseSession;
 const databases=new Map(),snapshots=new Map(),cursors=new Map();
@@ -37,7 +38,7 @@ async function importFile(path,input){
  try{
   for(let offset=0;offset<blob.size;offset+=CHUNK){
    const data=new Uint8Array(await blob.slice(offset,offset+CHUNK).arrayBuffer());
-   const tx=storage.transaction('blocks','readwrite'),done=complete(tx);for(let at=0;at<data.length;at+=pageSize)tx.objectStore('blocks').put({path,offset:-(offset+at),version:0,data:data.slice(at,at+pageSize)});await done;
+   const tx=storage.transaction('blocks','readwrite'),done=complete(tx);for(let at=0;at<data.length;at+=pageSize)tx.objectStore('blocks').put({path,offset:-(offset+at),version:0,data:data.slice(at,at+pageSize)});await done;progress('Opening database',Math.min(offset+CHUNK,blob.size),blob.size);
   }
   const tx=storage.transaction('metadata','readwrite'),done=complete(tx);tx.objectStore('metadata').put({name:path,fileSize:blob.size,version:0,_mediaSession:sessionId});await done;
  }catch(e){await removeFile(path);throw e;}
@@ -45,7 +46,7 @@ async function importFile(path,input){
 async function copyFile(source,path){
  const metadataTx=storage.transaction('metadata'),meta=await request(metadataTx.objectStore('metadata').get(source));
  if(!meta)throw new Error('The database snapshot is no longer available.');
- let lastKey=null,lastOffset=null;
+ let lastKey=null,lastOffset=null,copied=0;
  try{
   for(;;){
    const rows=await new Promise((resolve,reject)=>{
@@ -57,11 +58,11 @@ async function copyFile(source,path){
      if(bytes>=CHUNK){resolve(out);return;}item.continue();};
    });
    if(!rows.length)break;
-   const tx=storage.transaction('blocks','readwrite'),done=complete(tx);for(const row of rows)tx.objectStore('blocks').put(row);await done;
+   const tx=storage.transaction('blocks','readwrite'),done=complete(tx);for(const row of rows){tx.objectStore('blocks').put(row);copied+=row.data.byteLength;}await done;progress('Preparing snapshot',Math.min(copied,meta.fileSize),meta.fileSize);
   }
   const tx=storage.transaction('metadata','readwrite'),done=complete(tx);tx.objectStore('metadata').put({name:path,fileSize:meta.fileSize,version:0,_mediaSession:sessionId});await done;
   return meta.fileSize;
- }catch(e){await removeFile(path);throw e;}
+ }catch(e){await removeFile(path);e.retrySafe=true;throw e;}
 }
 async function readFile(path,start,end){
  if(end-start>CHUNK||start<0||end<start)throw new Error('Invalid database chunk request.');
@@ -142,4 +143,4 @@ const actions={
  async close({id}){for(const [cursor,value]of cursors)if(value.id===id)await actions.cursorFree({cursor});await databases.get(id)?.close();},
  async diagnostics(){return{backend:'IndexedDB pages',databaseCopies:databases.size,wasmBytes:engine.HEAPU8.buffer.byteLength,statementCount:[...databases.values()].reduce((n,db)=>n+db.cache.size,0)};}
 };
-self.onmessage=e=>{const {requestId,method,args}=e.data;chain=chain.catch(()=>{}).then(async()=>{try{if(!Object.hasOwn(actions,method))throw new Error('Unknown database request.');const result=await actions[method](args||{});self.postMessage({requestId,result});}catch(error){self.postMessage({requestId,error:String(error.message||error),errorName:error.name||'Error',retrySafe:error.retrySafe===true});}});};
+self.onmessage=e=>{const {requestId,method,args}=e.data;chain=chain.catch(()=>{}).then(async()=>{try{activeRequestId=requestId;progress(method,0,0,true);if(!Object.hasOwn(actions,method))throw new Error('Unknown database request.');const result=await actions[method](args||{});progress(method,1,1,true);self.postMessage({requestId,result});}catch(error){self.postMessage({requestId,error:String(error.message||error),errorName:error.name||'Error',retrySafe:error.retrySafe===true});}});};

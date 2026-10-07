@@ -13,7 +13,7 @@ assert.equal(context.activityLog.length,500);assert.equal(context.activityLog[0]
 context.logActivity('error','failure 699','x'.repeat(3000));assert.equal(context.activityLog.length,500);assert.equal(context.activityLog.at(-1).repeats,2,'Consecutive identical errors coalesce');
 (async()=>{
  const calls=[],owner={token:'review'},other={token:'scan'};
- Object.assign(context,{evidenceOperationInFlight:false,reviewWriteInFlight:false,reviewRevision:0,selected:new Set(['a']),activeBucket:'TO_REVIEW',ws:{events:[],decisions:{a:{status:'TO_REVIEW'}},reviewer:''},C:{cryptoRandom:()=> 'id'},
+ Object.assign(context,{reportExportActive:false,catalogTotalsCache:null,evidenceOperationInFlight:false,reviewWriteInFlight:false,reviewRevision:0,selected:new Set(['a']),activeBucket:'TO_REVIEW',ws:{events:[],decisions:{a:{status:'TO_REVIEW'}},reviewer:''},C:{cryptoRandom:()=> 'id'},
   toast:message=>calls.push(message),installCatalog:async()=>calls.push('catalog'),renderResults:async()=>calls.push('render'),
   db:{transaction:null,async idle(){calls.push('idle');},async run(sql){calls.push(sql);if(sql==='BEGIN')this.transaction=owner;if(sql==='COMMIT'){this.transaction=other;throw Error('Commit failed after its transaction ended');}if(sql==='ROLLBACK')this.transaction=null;}}
  });

@@ -52,9 +52,21 @@ Allow enough disk space for the working copy and saved snapshots. Saved previews
 
 ## Scan speed
 
-Choose **Scan speed → Parallel file workers** before starting or resuming a scan. The default is **4**, with **1–8** available. File reads, fingerprints, and common-image thumbnails run concurrently; results are saved in discovery order. The selected worker count is saved with the database.
+Choose **Scan speed → Parallel file workers** before starting or resuming a scan. The default is **4**, with **1–8** available. File reads and fingerprints run concurrently; results are saved in discovery order. Preview decoding runs one at a time, separately from the selected file-worker count, to reduce peak memory use. The selected worker count is saved with the database.
 
-Start with 4. Fewer workers can help when memory or a network connection is limited; more may help on fast storage. Pending file preparation is bounded by the selected worker count. Database publication, heavier video and specialist-format preview decoding, and media within each ZIP archive remain coordinated. Storage, decoding, and database write speed can limit the benefit, so additional workers do not guarantee a proportional speed increase. Cancellation returns unpublished file jobs to the resume queue.
+Start with 4. Fewer workers can help when memory or a network connection is limited; more may help on fast storage. Pending file preparation is bounded by the selected worker count. Database publication, preview decoding, and media within each ZIP archive remain coordinated. Storage, decoding, and database write speed can limit the benefit, so additional workers do not guarantee a proportional speed increase. Cancellation returns unpublished file jobs to the resume queue.
+
+Preview input is limited to 128 MiB and 32 megapixels. Ordinary image headers must provide readable dimensions before decoding; unusual or damaged headers can leave a placeholder even if another viewer can open the file. These checks reduce allocations but do not guarantee a particular process-memory ceiling. The inspector uses bounded decoded images for supported raster formats.
+
+Large duplicate groups show a location count on the card. Inspect an item to browse **Next 100 locations** or return to **First 100 locations**. Search results use a matching location for the filename, path, and inspection.
+
+## Saving and report export
+
+**Maintenance → Minimum time between automatic saves** offers 1, 5, or 15 minutes. This is a minimum: larger databases and slower saves increase the spacing automatically. The database status shows the last successful portable-file save. Use **Save database** when you need a current copy before closing or moving it. Status totals can take a few seconds to catch up during scanning.
+
+Saving still copies a consistent database snapshot and can briefly pause database work. The progress indicator shows snapshot copying and file writing. Standalone local recovery reuses the successful save's snapshot. Keep enough disk space for the working database, snapshots, and portable file.
+
+Finish or cancel an active scan before choosing **Export report**. The report includes Non-compliant items and optionally password-protected Evidence. If Evidence was locked before export, it is locked again afterward. Choose a destination file; export writes records in batches, shows progress, and offers Cancel. Review changes wait until export finishes so its contents remain consistent. In browsers without a writable file picker, large reports download as numbered parts of roughly 8 MiB; allow multiple downloads and keep all parts. Parts already downloaded remain if you cancel later.
 
 ## Activity log and review feedback
 
@@ -80,7 +92,7 @@ The optional scanner and live-results regression checks use Node.js 24 or later:
 
 The build uses the vendored runtimes and embedded HTML templates. The app does not download code or decoder assets at runtime. External license links in About open websites only when clicked.
 
-- `src/` contains the reviewer, database client and worker, trusted wrapper database host, and preview worker.
+- `src/` contains the reviewer, database client and worker, trusted wrapper database host, preview worker, and first-party Forge database transport.
 - `scripts/` assembles the standalone reviewer and refreshes the packaged app.
 - `vendor/` contains the SQLite and video-decoder runtimes and their license notices.
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.3.1 — Unreleased
+
+- Coalesce database status updates instead of recounting the catalog for each scanned file.
+- Coordinate preview decoding separately from parallel file hashing, check image headers before decoding, and retain placeholders after resource-limit failures.
+- Load card summaries and page duplicate locations in groups of 100; use the same matching location for display and inspection.
+- Report snapshot-copy progress through the Forge bridge and avoid retrying snapshots whose outcome is unknown.
+- Space automatic saves according to database size and save duration, add a minimum save interval in Maintenance, and reuse a saved snapshot for local recovery.
+- Stream matching report records to the chosen file; finish scanning before exporting. Download-only browsers receive numbered report parts.
+
 ## 3.3.0 — October 6, 2026
 
 - Add configurable parallel file workers under Scan speed: default 4, adjustable from 1 to 8.
