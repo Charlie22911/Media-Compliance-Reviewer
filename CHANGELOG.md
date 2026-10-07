@@ -2,6 +2,11 @@
 
 ## 3.3.1 — Unreleased
 
+- Visit immediate user folders alphabetically, finish each user's subtree before moving on, and save its folder position and discovered paths for resume.
+- Keep successfully read Forge folder entries when a later entry in the same page fails; preserve exhausted folder errors across resumes.
+- Place retry, save, and review progress in a fixed Activity panel below Database.
+- Prepare database copies incrementally so scan and review writes can run between copy steps.
+- Queue review clicks on new selections, commit their audit entries with decisions, and release review actions before page refills finish.
 - Coalesce database status updates instead of recounting the catalog for each scanned file.
 - Coordinate preview decoding separately from parallel file hashing, check image headers before decoding, and retain placeholders after resource-limit failures.
 - Load card summaries and page duplicate locations in groups of 100; use the same matching location for display and inspection.

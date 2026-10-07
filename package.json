@@ -9,7 +9,8 @@
     "test:scan": "node scripts/test-concurrent-scan.cjs",
     "test:results": "node scripts/test-live-results.cjs",
     "test:review": "node scripts/test-review-actions.cjs",
-    "test:recovery": "node scripts/test-scan-recovery.cjs"
+    "test:recovery": "node scripts/test-scan-recovery.cjs",
+    "test:responsive": "node scripts/test-responsive-database.cjs && node scripts/test-incremental-snapshot.cjs && node scripts/test-forge-folder-pages.cjs"
   },
   "devDependencies": {
     "esbuild": "0.25.10"

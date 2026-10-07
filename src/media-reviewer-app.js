@@ -53,6 +53,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   const activityLog = [],MAX_LOG_ENTRIES = 500;
   let reviewActionInFlight = false,reviewWriteInFlight = false,reviewRevision = 0;
+  const reviewQueue = [],pendingReviewKeys = new Set();
   function logActivity(level, message, detail = '') {
     const entry = { at: new Date().toISOString(), level, message: String(message).slice(0,2000), detail: String(detail).slice(0,2000) };
     const previous = activityLog.at(-1);
@@ -466,9 +467,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   function finishOperation(kind) {operationStates.delete(kind);renderOperationStatus();}
   function renderOperationStatus() {
     const el = $('#operation-status');if (!el) return;
-    el.textContent = [...operationStates].map(([kind, value]) => kind + ': ' + value.phase + (value.total ? ' ' + Math.floor(100 * value.done / value.total) + '%' : '')).join(' · ');
-    el.classList.toggle('hidden', !operationStates.size);
-    $('#cancel-operation').classList.toggle('hidden', !activeEvidenceOperation);
+    el.textContent = [...operationStates].map(([kind, value]) => kind + ': ' + value.phase + (value.total ? ' ' + Math.floor(100 * value.done / value.total) + '%' : '')).join(' · ') || 'No background operations.';
+    $('#cancel-operation').classList.toggle('invisible', !activeEvidenceOperation);
   }
   const yieldPaint = () => new Promise((resolve) => {let done = false;const finish = () => {if (!done) {done = true;resolve();}};setTimeout(finish, 40);requestAnimationFrame(finish);});
   function attachDatabaseClient(database) {
@@ -596,6 +596,18 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       await initSchema(candidate);
       migration = await candidate.upgrade(MEDIA_DATABASE_SCHEMA);
       loaded = C.validateWorkspace((await candidate.exec("SELECT value FROM app_meta WHERE key='workspace_json'"))[0].values[0][0]);
+      // A review may commit while an incremental save is copying. Its audit
+      // row is authoritative even when the metadata JSON was saved earlier.
+      const events = new Map(loaded.events.map(event => [event.id, event]));
+      let lastEventRow = 0;
+      for (;;) {
+        const rows = (await candidate.exec('SELECT rowid,id,decision_key,previous_status,new_status,at,reviewer,notes,bulk_id FROM review_events WHERE rowid>? ORDER BY rowid LIMIT 128',[lastEventRow]))[0]?.values || [];
+        if (!rows.length) break;
+        for (const [rowid,id,decisionKey,previousStatus,newStatus,at,reviewer,notes,bulkId] of rows) {
+          lastEventRow = rowid;events.set(id,{ id,decisionKey,previousStatus,newStatus,at,reviewer,notes,bulkId });
+        }
+      }
+      loaded.events = [...events.values()];
     } catch (error) {await candidate.close();throw error;}
     await db?.close();
     db = candidate;
@@ -3181,7 +3193,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   function renderSelection() {
     $$('.bottom-selection-count').forEach((el) => el.textContent = selected.size + ' selected');
-    $$('[data-bulk],[data-review]').forEach(button => button.disabled = reviewActionInFlight || evidenceOperationInFlight);
+    $$('[data-bulk],[data-review]').forEach(button => button.disabled = evidenceOperationInFlight || reportExportActive);
     const bar = $('#selectionbar');
     bar.classList.toggle('show', selected.size > 0);
     $('#selection-count').textContent = `${selected.size} selected`;
@@ -3653,9 +3665,10 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     }});} finally {finishOperation('Scan recovery');}
   }
   async function runJournalScan(rootHandle, scan, scanConfig, onEntry, controller) {
-    const journal = await C.scanJournal(db, scan.id, scan.rootId),errors = [];
-    // Forge has 16 iterator slots. Leave room while prior reads are closing.
-    const DIRECTORY_BATCH_SIZE = 32,MAX_DIRECTORY_FRAMES = 8,MAX_PENDING_FILES = 128,frames = [],directoryRetries = new Map();
+    const journal = await C.scanJournal(db, scan.id, scan.rootId);
+    const failedFolders = (await db.exec("SELECT path,error FROM scan_jobs WHERE scan_id=? AND kind='directory' AND state='failed'", [scan.id]))[0]?.values || [];
+    const errors = failedFolders.map(([path, message]) => ({ path, message: message || 'Folder could not be listed during an earlier attempt.' }));
+    const DIRECTORY_BATCH_SIZE = 32,MAX_PENDING_FILES = 128,frames = [],directoryRetries = new Map();
     let discovery = null,closing = false;
     const discoveryController = { get cancelled() {return controller.cancelled || closing;} };
     const releaseHandle = async handle => {
@@ -3664,7 +3677,15 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       catch (error) {logActivity('warning','A temporary source handle could not be released after retries',String(error.message || error));}
     };
     if (!(await journal.count())) await journal.add('', 'directory');
-    await db.run('INSERT OR REPLACE INTO scan_job_meta VALUES (?,?)', [scan.id, JSON.stringify(scan.config)]);
+    const savedMeta = (await db.exec('SELECT value FROM scan_job_meta WHERE scan_id=?', [scan.id]))[0]?.values[0][0];
+    const savedCursor = savedMeta ? JSON.parse(savedMeta) : null;
+    // Existing journals retain all unfinished work. Only a journal which was
+    // already traversed alphabetically can assume earlier paths are finished.
+    let fromFolder = savedCursor?.directoryOrder === 'user-folder-asc-v1' ? savedCursor.lastUserFolder ?? '' : null;
+    const saveCursor = async path => {
+      fromFolder = path.split('/')[0];scan.lastScannedFolder = path;scan.lastScannedUserFolder = fromFolder;scan.directoryOrder = 'user-folder-asc-v1';
+      await db.run('INSERT OR REPLACE INTO scan_job_meta VALUES (?,?)', [scan.id, JSON.stringify({ config:scan.config,directoryOrder:'user-folder-asc-v1',lastUserFolder:fromFolder,lastFolder:path })]);
+    };
     const resolveDirectory = async (path) => {
       let handle = rootHandle;
       try {
@@ -3717,11 +3738,17 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         if (frame) {frames.pop();await closeFrame(frame);}
         if (retry) {
           directoryRetries.set(job.path,attempts);
-          logActivity('warning','Retrying folder listing (' + attempts + ' of 3)',job.path + ': ' + String(result.error.message || result.error));
+          const detail = (job.path || rootHandle.name) + ': ' + (result.error.name || 'Error') + ': ' + String(result.error.message || result.error);
+          logActivity('warning','Retrying folder listing (' + attempts + ' of 3)',detail);
+          showOperation('Scan recovery','Reading folder ' + (job.path || rootHandle.name) + ' · retry ' + attempts + ' of 3');
           try {await C.retryDelay(250 * 2 ** (attempts - 1),discoveryController);} catch (error) {if (!controller.cancelled || error.name !== 'AbortError') throw error;}
         } else {
           directoryRetries.delete(job.path);
-          if (result.error && !controller.cancelled) errors.push({ path: job.path, message: String(result.error.message || result.error) });
+          if (result.error && !controller.cancelled) {
+            errors.push({ path: job.path, message: 'Folder listing failed after retries: ' + (result.error.name || 'Error') + ': ' + String(result.error.message || result.error) });
+            logActivity('error','Folder could not be listed; saved paths remain queued', (job.path || rootHandle.name) + ': ' + String(result.error.message || result.error));
+          }
+          finishOperation('Scan recovery');
         }
       }
       await setDirty();
@@ -3755,10 +3782,13 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           // Wait for a full batch of capacity instead of resuming discovery for
           // one entry after each photo when the backlog is near its limit.
           if (room >= DIRECTORY_BATCH_SIZE || !fileJob) {
-            // Suspend ancestor iterators while visiting recently found children.
-            // Deeper pending directories remain on disk until a frame is free.
-            const nextDirectory = frames.length < MAX_DIRECTORY_FRAMES ? await journal.next('directory') : null;
-            if (nextDirectory) await journal.start(nextDirectory.seq);
+            // Finish the parent's saved listing before choosing its first child.
+            // This fixes the folder order without retaining ancestor iterators.
+            let nextDirectory = !frames.length && !fileJob ? await journal.next('directory', fromFolder) : null;
+            // Do not advance the saved user cursor while that user's final
+            // prepared files are still waiting to be committed.
+            if (nextDirectory && queue.pending.length && nextDirectory.path.split('/')[0] !== fromFolder) nextDirectory = null;
+            if (nextDirectory) {await journal.start(nextDirectory.seq);await saveCursor(nextDirectory.path);}
             if (nextDirectory || frames.length) {
               const job = nextDirectory || frames.at(-1).job;
               if (!fileJob) setScanStatus('Listing folder:', job.path || rootHandle.name);
@@ -3790,22 +3820,19 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         await new Promise(resolve => setTimeout(resolve, 0));
       }
     } finally {
-      // Drain any pending read before closing its iterator and releasing handles.
-      // Unpublished paths are rediscovered from this pending folder on resume.
+      // Save a read that finished while cancellation was being requested.
       closing = true;
       controller.cancelPreparations?.();
       await Promise.all(queue.pending.map(entry=>entry.preparation?.promise));
       for (const entry of queue.pending) try {await journal.finish(entry.scanJob.seq,'pending');}catch(_){}
       queue.pending.length=0;
-      if (discovery) await discovery.promise;
-      if (discovery && !discovery.frame) {
-        try {await journal.finish(discovery.job.seq, 'pending');} catch (_) {}
-      }
+      if (discovery) await publishBatch();
       for (const frame of frames.reverse()) {
         // Resume also resets processing jobs if a storage error prevents cleanup.
         try {await journal.finish(frame.job.seq, 'pending');} catch (_) {}
         try {await closeFrame(frame);} catch (_) {}
       }
+      finishOperation('Scan recovery');
     }
     return { errors, cancelled: controller.cancelled };
   }
@@ -4442,15 +4469,27 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     }
   }
   async function runReviewAction(keys, status, notes) {
-    if (reviewActionInFlight || !keys.length) return;
+    keys = [...new Set(keys)].filter(key => !pendingReviewKeys.has(key));
+    if (!keys.length) return;
+    if (reviewQueue.length >= 16) {toast('The review queue is full. Wait for the queued items to save.', true);return;}
+    keys.forEach(key => pendingReviewKeys.add(key));
+    let resolve;const done = new Promise(finish => resolve = finish);
+    reviewQueue.push({ keys, status, notes, bucket: activeBucket, database: db, workspace: ws, resolve });
+    if (reviewActionInFlight) {showOperation('Review', 'Saving items · ' + reviewQueue.length + ' action(s) queued');return done;}
     reviewActionInFlight = true;renderSelection();renderScanActivity();
-    showOperation('Review', 'Saving selected items…');
     try {
-      if (status === 'EVIDENCE') await captureEvidence(keys);
-      else if (activeBucket === 'EVIDENCE') await reassignEvidence(keys, status, notes);
-      else await assign(keys, status, notes);
-    } catch (error) {toast('Review action failed: ' + String(error.message || error), true);}
-    finally {reviewActionInFlight = false;renderSelection();renderScanActivity();finishOperation('Review');}
+      while (reviewQueue.length) {
+        const action = reviewQueue.shift();showOperation('Review', 'Saving ' + action.keys.length + ' selected item(s)…');
+        try {
+          if (action.database !== db || action.workspace !== ws) throw new Error('Database changed before the queued review action.');
+          if (action.status === 'EVIDENCE') await captureEvidence(action.keys);
+          else if (action.bucket === 'EVIDENCE') await reassignEvidence(action.keys, action.status, action.notes);
+          else await assign(action.keys, action.status, action.notes);
+        } catch (error) {toast('Review action failed: ' + String(error.message || error), true);}
+        finally {action.keys.forEach(key => pendingReviewKeys.delete(key));action.resolve();}
+      }
+    } finally {reviewActionInFlight = false;renderSelection();renderScanActivity();finishOperation('Review');}
+    return done;
   }
   function showResultsLoading() {
     const grid = $('#results');grid.style.minHeight = '';
@@ -4473,9 +4512,12 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       if (database !== db || workspace !== ws) throw new Error('Database changed before the review action.');
       for (const key of keys) {
         const d = await ws.decisions[key];if (!d) throw new Error('Selected item is no longer in this database.');
-        const previous = d.status;d.status = status;d.reviewedAt = now;d.reviewer = ws.reviewer || '';
-        if (notes !== undefined) d.notes = notes;
-        ws.events.push({ id:C.cryptoRandom(),decisionKey:key,previousStatus:previous,newStatus:status,at:now,reviewer:ws.reviewer || '',notes:d.notes || '',bulkId });
+        const previous = d.status,updated = { ...d,status,reviewedAt:now,reviewer:ws.reviewer || '' };
+        if (notes !== undefined) updated.notes = notes;
+        ws.decisions[key] = updated;
+        const event = { id:C.cryptoRandom(),decisionKey:key,previousStatus:previous,newStatus:status,at:now,reviewer:ws.reviewer || '',notes:updated.notes || '',bulkId };
+        ws.events.push(event);
+        database.enqueue('INSERT INTO review_events VALUES (?,?,?,?,?,?,?,?)', [event.id,key,previous,status,now,event.reviewer,event.notes,bulkId]);
       }
       await database.run('COMMIT');committed = true;
     } catch (error) {
@@ -4494,8 +4536,11 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       showResultsLoading();patchSelection();
     }
     logActivity('info',keys.length + ' item' + (keys.length === 1 ? '' : 's') + ' moved to ' + ({TO_REVIEW:'To review',COMPLIANT:'Compliant',NON_COMPLIANT:'Non-compliant',EVIDENCE:'Evidence'}[status] || status));
-    catalogTotalsCache = null;await setDirty();await renderResults(false, true);
-    if ($('#inspect-dialog').open && inspectIndex >= 0) await renderInspector();
+    catalogTotalsCache = null;await setDirty();
+    // Saving the decision must not wait for page queries or preview decoding.
+    renderResults(false, true).then(async () => {
+      if ($('#inspect-dialog').open && inspectIndex >= 0 && !reviewActionInFlight) await renderInspector();
+    }).catch(error => toast('Items were saved, but the page could not refresh: ' + error.message, true));
   }
   async function verifyInspectorFullHash() {
     const card = visibleCards[inspectIndex];
@@ -5035,7 +5080,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     applyZoom();
   }
   async function exportReport() {
-    if (scanController || evidenceOperationInFlight || reviewWriteInFlight || reportExportActive) {toast('Finish or cancel the current scan or write before exporting a report.',true);return;}
+    if (scanController || evidenceOperationInFlight || reviewActionInFlight || reportExportActive) {toast('Finish or cancel the current scan or write before exporting a report.',true);return;}
     const database=db,generation=databaseGeneration;
     let destination,writable,dialog,transaction,parts=[],partBytes=0,partNumber=1,exported=0,cancelled=false,temporaryVault=false;
     const current=()=>{if(cancelled)throw previewAbortError();if(database!==db||generation!==databaseGeneration)throw new Error('Database changed during report export.');};

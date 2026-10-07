@@ -21,7 +21,7 @@
   async asBlob(){const parts=[];for(let at=0;at<this.size;at+=1024*1024)parts.push(new Blob([await this.slice(at,Math.min(this.size,at+1024*1024)).arrayBuffer()]));return new Blob(parts,{type:this.type});}
  }
  class Database {
-  constructor(id){this.id=id;this.pending=[];this.flushPromise=null;this.timer=null;this.transaction=null;this.closed=false;this.beginChain=Promise.resolve();this.retryDelayMs=250;this.uncertainWrite=null;}
+  constructor(id){this.id=id;this.pending=[];this.flushPromise=null;this.timer=null;this.transaction=null;this.closed=false;this.beginChain=Promise.resolve();this.snapshotChain=Promise.resolve();this.retryDelayMs=250;this.uncertainWrite=null;}
   static async open(input){const result=await rpc('open',{input});return new Database(result.id);}
   enqueue(sql,params=[]){if(this.closed)throw new Error('Database changed.');if(this.uncertainWrite)throw this.uncertainWrite;this.pending.push({sql:String(sql),params});if(this.pending.length>=32)this.flush().catch(e=>{this.error=e;});else if(!this.timer)this.timer=setTimeout(()=>{this.timer=null;this.flush().catch(e=>{this.error=e;});},4);}
   async retry(method,args,safe){
@@ -59,7 +59,16 @@
   async exec(sql,params=[]){await this.flush();sql=String(sql);return this.retry('query',{id:this.id,sql,params,token:this.transaction?.token},()=>/^\s*SELECT\b/i.test(sql));}
   prepare(sql){let params=[],cursor=null,row=null;const free=async()=>{if(cursor){const value=cursor;cursor=null;await rpc('cursorFree',{cursor:value});}row=null;};return{bind(value){if(cursor)throw new Error('Finish the previous query before rebinding.');params=value;},run:async value=>{await free();await this.run(sql,value||params);},step:async()=>{await this.flush();if(!cursor)cursor=await rpc('cursorOpen',{id:this.id,sql,params,token:this.transaction?.token});row=await rpc('cursorStep',{cursor});return row!==null;},get:()=>row,free};}
   async upgrade(schema){await this.idle();return rpc('upgrade',{id:this.id,schema});}
-  async exportBlob(){return this.boundary(async()=>{await this.idle();return new Snapshot(await this.retry('snapshot',{id:this.id},error=>error.retrySafe===true));});}
+  async exportBlob(){
+   const result=this.snapshotChain.catch(()=>{}).then(async()=>{
+    let copying;
+    // Order snapshot initialization with BEGIN, then release that boundary.
+    // The worker copies incrementally and accepts writes between copy steps.
+    await this.boundary(async()=>{await this.idle();copying=this.retry('snapshot',{id:this.id},error=>error.retrySafe===true);});
+    return new Snapshot(await copying);
+   });
+   this.snapshotChain=result.catch(()=>{});return result;
+  }
   async close(){if(this.closed)return;if(this.transaction)await this.run('ROLLBACK');try{await this.flush();}catch(_){}await rpc('close',{id:this.id});this.closed=true;}
  }
  async function recordStore(database,kind,limit=256){

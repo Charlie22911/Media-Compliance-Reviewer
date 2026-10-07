@@ -3,8 +3,10 @@ import * as SQLite from '../vendor/wa-sqlite/src/sqlite-api.js';
 import {IDBBatchAtomicVFS} from '../vendor/wa-sqlite/src/examples/IDBBatchAtomicVFS.js';
 
 const STORAGE='photo-audit-sqlite-pages-v1',CHUNK=1024*1024;
-let engine,sqlite,vfs,storage,chain=Promise.resolve(),activeRequestId=null,lastProgressAt=0;
-function progress(phase,done=0,total=0,force=false){const now=Date.now();if(!force&&now-lastProgressAt<250)return;lastProgressAt=now;self.postMessage({requestId:activeRequestId,progress:{phase,done,total}});}
+let engine,sqlite,vfs,storage,activeRequestId=null,lastProgressAt=0;
+const requests=[],backups=new Map(),DEFERRED=Symbol('incremental snapshot');
+let pumping=false;
+function progress(phase,done=0,total=0,force=false){const now=Date.now();if(!force){if(now-lastProgressAt<250)return;lastProgressAt=now;}self.postMessage({requestId:activeRequestId,progress:{phase,done,total}});}
 const sessionId=crypto.randomUUID(),sessionLock='photo-audit-database-session:'+sessionId;
 let releaseSession;
 const databases=new Map(),snapshots=new Map(),cursors=new Map();
@@ -103,14 +105,25 @@ class Database {
   try{for(const command of commands)await this.run(command.sql,command.params);const rows=preview?await this.exec(preview.sql,preview.params):null;await this.run(preview?'ROLLBACK':'COMMIT');return rows;}
   catch(e){try{await this.run('ROLLBACK');e.retrySafe=true;}catch(_){}throw e;}
  }
- async snapshot(){
+ async snapshot(requestId){
   if(this.transaction)throw new Error('Finish the active transaction before saving.');
-  // Committed VFS pages are durable before the request finishes. The serialized
-  // worker queue prevents changes during the disk copy and preserves read cursors.
-  await this.clear();
-  const path='/snapshot-'+crypto.randomUUID()+'.sqlite';let size;
-  size=await copyFile(this.path,path);
-  const token=crypto.randomUUID();snapshots.set(token,{path,size});return{token,size};
+  if(backups.has(this.id))throw new Error('A database snapshot is already being prepared.');
+  const pageSize=Number((await this.exec('PRAGMA page_size'))[0].values[0][0]);
+  const path='/snapshot-'+crypto.randomUUID()+'.sqlite';let destination,handle;
+  try{
+   const pointer=await sqlite.open_v2(path,SQLite.SQLITE_OPEN_READWRITE|SQLite.SQLITE_OPEN_CREATE,'media-idb');
+   destination=new Database('snapshot',path,pointer);
+   await destination.run('PRAGMA page_size='+pageSize+'; PRAGMA cache_size=-8192; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');
+   await destination.clear();
+   handle=engine.ccall('sqlite3_backup_init','number',['number','string','number','string'],[pointer,'main',this.pointer,'main']);
+   if(!handle)throw new Error(sqlite.errmsg(pointer));
+   backups.set(this.id,{source:this,destination,handle,path,requestId,pages:Math.max(1,Math.floor(256*1024/pageSize)),pageSize,busyRetries:0});
+   return DEFERRED;
+  }catch(error){
+   if(handle)await engine.ccall('sqlite3_backup_finish','number',['number'],[handle],{async:true});
+   if(destination){await destination.clear();await sqlite.close(destination.pointer);}
+   await removeFile(path);error.retrySafe=true;throw error;
+  }
  }
  async close(){await this.clear();if(this.pointer)await sqlite.close(this.pointer);await removeFile(this.path);databases.delete(this.id);}
 }
@@ -135,12 +148,69 @@ const actions={
   return db.batch(commands);
  },
  async upgrade({id,schema}){const db=databases.get(id);await db.run(schema);return await ImageReviewerCore.upgradeDatabase(db);},
- async snapshot({id}){return databases.get(id).snapshot();},
+ async snapshot({id}){return databases.get(id).snapshot(activeRequestId);},
  async read({token,start,end}){const value=snapshots.get(token);if(!value)throw new Error('Database snapshot expired.');return readFile(value.path,start,Math.min(end,value.size));},
  async release({token}){const value=snapshots.get(token);if(value&&!value.retained){snapshots.delete(token);await removeFile(value.path);}},
  async recoveryPut({token}){await boot();const value=snapshots.get(token);if(!value)throw new Error('Recovery snapshot expired.');const prior=await actions.recoveryGet();const tx=storage.transaction('metadata','readwrite'),done=complete(tx);tx.objectStore('metadata').put({name:'/recovery-pointer',snapshotPath:value.path,size:value.size,token});await done;value.retained=true;if(prior&&prior.token!==token){const old=snapshots.get(prior.token);if(old){old.retained=false;await actions.release({token:prior.token});}}},
  async recoveryGet(){await boot();const tx=storage.transaction('metadata'),value=await request(tx.objectStore('metadata').get('/recovery-pointer'));if(!value)return null;snapshots.set(value.token,{path:value.snapshotPath,size:value.size,retained:true});return{token:value.token,size:value.size};},
- async close({id}){for(const [cursor,value]of cursors)if(value.id===id)await actions.cursorFree({cursor});await databases.get(id)?.close();},
+ async close({id}){const backup=backups.get(id);if(backup)await finishBackup(backup,new Error('Database changed during save.'));for(const [cursor,value]of cursors)if(value.id===id)await actions.cursorFree({cursor});await databases.get(id)?.close();},
  async diagnostics(){return{backend:'IndexedDB pages',databaseCopies:databases.size,wasmBytes:engine.HEAPU8.buffer.byteLength,statementCount:[...databases.values()].reduce((n,db)=>n+db.cache.size,0)};}
 };
-self.onmessage=e=>{const {requestId,method,args}=e.data;chain=chain.catch(()=>{}).then(async()=>{try{activeRequestId=requestId;progress(method,0,0,true);if(!Object.hasOwn(actions,method))throw new Error('Unknown database request.');const result=await actions[method](args||{});progress(method,1,1,true);self.postMessage({requestId,result});}catch(error){self.postMessage({requestId,error:String(error.message||error),errorName:error.name||'Error',retrySafe:error.retrySafe===true});}});};
+function replyError(requestId,error){self.postMessage({requestId,error:String(error.message||error),errorName:error.name||'Error',retrySafe:error.retrySafe===true});}
+async function finishBackup(backup,error=null){
+ backups.delete(backup.source.id);activeRequestId=backup.requestId;
+ let size=0,closed=false;
+ try{
+  const handle=backup.handle;backup.handle=null;
+  const result=await engine.ccall('sqlite3_backup_finish','number',['number'],[handle],{async:true});
+  if(result!==SQLite.SQLITE_OK&&!error)error=new Error(sqlite.errmsg(backup.destination.pointer));
+  if(!error)size=Number((await backup.destination.exec('PRAGMA page_count'))[0].values[0][0])*backup.pageSize;
+ }catch(problem){error=problem;}
+ try{await backup.destination.clear();await sqlite.close(backup.destination.pointer);backup.destination.pointer=null;closed=true;}
+ catch(problem){error=problem;}
+ if(error){
+  // Only replay a failed copy after its destination has been closed and removed.
+  if(closed)try{await removeFile(backup.path);error.retrySafe=true;}catch(problem){error=problem;}
+  replyError(backup.requestId,error);return;
+ }
+ const token=crypto.randomUUID();snapshots.set(token,{path:backup.path,size});
+ progress('Preparing snapshot',size,size,true);self.postMessage({requestId:backup.requestId,result:{token,size}});
+}
+async function stepBackup(backup){
+ activeRequestId=backup.requestId;
+ try{
+  // Asyncify permits one SQLite call at a time. Source transactions and review
+  // writes run between these bounded steps, never during a suspended WASM call.
+  const result=await engine.ccall('sqlite3_backup_step','number',['number','number'],[backup.handle,backup.pages],{async:true});
+  if(result===SQLite.SQLITE_BUSY||result===SQLite.SQLITE_LOCKED){
+   if(++backup.busyRetries>3)throw new Error('The database remained busy while preparing a snapshot.');
+   backup.retryAt=Date.now()+250*2**(backup.busyRetries-1);return;
+  }
+  if(result!==SQLite.SQLITE_OK&&result!==SQLite.SQLITE_DONE)throw new Error(sqlite.errmsg(backup.destination.pointer));
+  backup.busyRetries=0;backup.retryAt=0;
+  const total=engine._sqlite3_backup_pagecount(backup.handle),remaining=engine._sqlite3_backup_remaining(backup.handle);
+  progress('Preparing snapshot',(total-remaining)*backup.pageSize,total*backup.pageSize);
+  if(result===SQLite.SQLITE_DONE)await finishBackup(backup);
+ }catch(error){await finishBackup(backup,error);}
+}
+async function pump(){
+ if(pumping)return;pumping=true;let foreground=0;
+ try{
+  for(;;){
+   const backup=[...backups.values()].find(value=>!value.source.transaction&&(!value.retryAt||value.retryAt<=Date.now()));
+   if(requests.length&&(!backup||foreground<4)){
+    const {requestId,method,args}=requests.shift();activeRequestId=requestId;foreground++;
+    try{progress(method,0,0,true);if(!Object.hasOwn(actions,method))throw new Error('Unknown database request.');const result=await actions[method](args||{});if(result!==DEFERRED){progress(method,1,1,true);self.postMessage({requestId,result});}}
+    catch(error){replyError(requestId,error);}
+   }else if(backup){foreground=0;await stepBackup(backup);}
+   else break;
+   // Give incoming review and scan requests a chance to reach the queue.
+   await new Promise(resolve=>setTimeout(resolve,0));
+  }
+ }finally{
+  pumping=false;
+  const retryAt=Math.min(...[...backups.values()].filter(value=>!value.source.transaction&&value.retryAt).map(value=>value.retryAt));
+  if(Number.isFinite(retryAt))setTimeout(()=>pump(),Math.max(0,retryAt-Date.now()));
+ }
+}
+self.onmessage=e=>{requests.push(e.data);pump();};

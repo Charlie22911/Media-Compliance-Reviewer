@@ -83,13 +83,13 @@ const photo = name => ({ name, kind: 'file', async release() {} });
   }
   {
     const { sqlite, scan, stats } = fresh(), paths = [], controller = { cancelled: false };
-    const child = directory('slow', [photo('b.jpg')], stats), root = directory('root', [photo('a.jpg'), child], stats);
-    const open = root.getDirectoryHandle;
+    const child = directory('slow', [photo('b.jpg')], stats), user = directory('person.first', [photo('a.jpg'), child], stats), root = directory('root', [user], stats);
+    const open = user.getDirectoryHandle;
     let release, opening = false;
     const delayedOpen = new Promise(resolve => {release = resolve;});
-    root.getDirectoryHandle = async name => {opening = true;await delayedOpen;return open.call(root, name);};
+    user.getDirectoryHandle = async name => {opening = true;await delayedOpen;return open.call(user, name);};
     await context.runJournalScan(root, scan, config, async entry => {
-      if (!paths.length) {assert(opening, 'Folder opening overlaps media processing');await consume(entry, paths);release();}
+      if (!paths.length) {await new Promise(resolve=>setTimeout(resolve,0));assert(opening, 'Folder opening overlaps media processing');await consume(entry, paths);release();}
       else await consume(entry, paths);
     }, controller);
     assert.equal(paths.length, 2);assert.equal(stats.open, 0);sqlite.close();
@@ -157,7 +157,8 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     const root = directory('root', Array.from({ length: 200 }, (_, index) => directory('user' + index, [photo('a.jpg'), photo('skip.txt')], stats)), stats);
     let firstCount;
     await context.runJournalScan(root, scan, config, async entry => { firstCount ??= stats.listed.root; await consume(entry, paths); }, controller);
-    assert(firstCount <= 32, 'Process the first image after a small directory batch, rather than listing all 200 user folders');
+    assert.equal(firstCount,200,'List immediate folders before choosing the first alphabetical folder');
+    assert(Object.values(stats.visits).some(visits=>visits===1),'Media starts before the entire tree is listed');
     assert.equal(paths.length, 200); assert.equal(new Set(paths).size, 200); assert.equal(stats.open, 0);
     assert.equal(sqlite.exec("SELECT count(*) FROM scan_jobs WHERE state!='complete'")[0].values[0][0], 0);
     sqlite.close();
@@ -194,6 +195,19 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     await context.runJournalScan(root, scan, config, entry => consume(entry, paths), controller);
     assert.equal(paths.length, 2); assert.equal(new Set(paths).size, 2, 'A failed folder is retried without repeating completed files');
     sqlite.close();
+  }
+  {
+    const {sqlite,database,scan,stats}=fresh(),paths=[],controller={cancelled:false};
+    const root=directory('root',[directory('charlie.last',[photo('3.jpg')],stats),directory('alpha.first.extra',[photo('extra.jpg')],stats),directory('alpha.first',[photo('1.jpg'),directory('nested',[photo('nested.jpg')],stats)],stats),directory('bravo.middle',[photo('2.jpg')],stats)],stats);
+    await context.runJournalScan(root,scan,config,async entry=>{await consume(entry,paths);if(paths.length===2)controller.cancelled=true;},controller);
+    assert.deepEqual(paths,['alpha.first/1.jpg','alpha.first/nested/nested.jpg'],'Finish a user subtree before the next alphabetical user folder');
+    const cursor=JSON.parse((await database.exec('SELECT value FROM scan_job_meta WHERE scan_id=?',[scan.id]))[0].values[0][0]);
+    assert.equal(cursor.directoryOrder,'user-folder-asc-v1');assert.equal(cursor.lastUserFolder,'alpha.first');
+    const rootVisits=stats.visits.root,alphaVisits=stats.visits['alpha.first'];controller.cancelled=false;
+    await context.runJournalScan(root,scan,config,entry=>consume(entry,paths),controller);
+    assert.deepEqual(paths,['alpha.first/1.jpg','alpha.first/nested/nested.jpg','alpha.first.extra/extra.jpg','bravo.middle/2.jpg','charlie.last/3.jpg']);
+    assert.equal(stats.visits.root,rootVisits,'Resume uses the saved root inventory');
+    assert.equal(stats.visits['alpha.first'],alphaVisits,'Resume does not re-list a previous alphabetical folder');sqlite.close();
   }
   {
     const { sqlite, database, scan, stats } = fresh(), paths = [], controller = { cancelled: false };

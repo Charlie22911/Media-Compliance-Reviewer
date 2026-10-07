@@ -1020,11 +1020,20 @@
   async function recordStore(database, kind, limit = 256) {return await MediaDatabase.recordStore(database, kind, limit);}
   async function scanJournal(database, scanId, rootId) {
     await database.run('CREATE INDEX IF NOT EXISTS scan_jobs_pending_kind ON scan_jobs(scan_id,state,kind,seq)');
-    await database.run("UPDATE scan_jobs SET state='pending' WHERE scan_id=? AND state IN ('processing','failed')", [scanId]);
+    const userFolder = "CASE WHEN instr(path,'/')=0 THEN path ELSE substr(path,1,instr(path,'/')-1) END";
+    await database.run('CREATE INDEX IF NOT EXISTS scan_jobs_user_folder_order ON scan_jobs(scan_id,state,' + userFolder + " COLLATE NOCASE,path COLLATE NOCASE,seq) WHERE kind='directory'");
+    await database.run("UPDATE scan_jobs SET state='pending' WHERE scan_id=? AND (state='processing' OR (state='failed' AND kind='file'))", [scanId]);
     let seq = Number((await database.exec('SELECT COALESCE(MAX(seq),0) FROM scan_jobs WHERE scan_id=?', [scanId]))[0]?.values[0][0] || 0);
     return {
       async add(path, kind) {database.enqueue('INSERT OR IGNORE INTO scan_jobs(scan_id,seq,root_id,path,kind,state) VALUES (?,?,?,?,?,?)', [scanId, ++seq, rootId, path, kind, 'pending']);if (database.pending.length >= 32) await database.flush();},
-      async next(kind = null) {const row = (await database.exec("SELECT seq,path,kind FROM scan_jobs WHERE scan_id=? AND state='pending'" + (kind ? ' AND kind=?' : '') + ' ORDER BY seq' + (kind === 'directory' ? ' DESC' : '') + ' LIMIT 1', kind ? [scanId, kind] : [scanId]))[0]?.values[0];return row ? { seq: row[0], path: row[1], kind: row[2] } : null;},
+      async next(kind = null, fromUserFolder = null) {
+        const directory = kind === 'directory',params = [scanId],resume = directory && fromUserFolder !== null;
+        if (kind && !directory) params.push(kind);if (resume) params.push(fromUserFolder);
+        const where = directory ? " AND kind='directory'" : kind ? ' AND kind=?' : '';
+        const order = directory ? userFolder + ' COLLATE NOCASE,path COLLATE NOCASE,seq' : 'seq';
+        const row = (await database.exec("SELECT seq,path,kind FROM scan_jobs WHERE scan_id=? AND state='pending'" + where + (resume ? ' AND (' + userFolder + ') COLLATE NOCASE>=?' : '') + ' ORDER BY ' + order + ' LIMIT 1', params))[0]?.values[0];
+        return row ? { seq: row[0], path: row[1], kind: row[2] } : null;
+      },
       async pendingCount(kind, limit) {return Number((await database.exec("SELECT COUNT(*) FROM (SELECT seq FROM scan_jobs WHERE scan_id=? AND state='pending' AND kind=? LIMIT ?)", [scanId, kind, limit]))[0]?.values[0][0] || 0);},
       async start(seq) {await database.run("UPDATE scan_jobs SET state='processing' WHERE scan_id=? AND seq=?", [scanId, seq]);},
       async finish(seq, state, occurrenceId = null, error = null) {await database.run('UPDATE scan_jobs SET state=?,occurrence_id=?,error=? WHERE scan_id=? AND seq=?', [state, occurrenceId, error, scanId, seq]);},
