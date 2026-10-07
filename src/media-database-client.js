@@ -1,5 +1,7 @@
 (function(g){
  'use strict';
+ const BATCH_COMMANDS=32,BATCH_BYTES=2*1024*1024;
+ const commandBytes=command=>command.sql.length*2+command.params.reduce((size,value)=>size+(typeof value==='string'?value.length*2:value?.byteLength||8),0);
  let worker=null,sequence=0,inFlight=0;const waiting=[],pending=new Map();
  function sendNext(){while(inFlight<4&&waiting.length){const item=waiting.shift();inFlight++;pending.set(item.requestId,item);worker.postMessage({requestId:item.requestId,method:item.method,args:item.args});}}
  function localCall(method,args){
@@ -21,9 +23,9 @@
   async asBlob(){const parts=[];for(let at=0;at<this.size;at+=1024*1024)parts.push(new Blob([await this.slice(at,Math.min(this.size,at+1024*1024)).arrayBuffer()]));return new Blob(parts,{type:this.type});}
  }
  class Database {
-  constructor(id){this.id=id;this.pending=[];this.flushPromise=null;this.timer=null;this.transaction=null;this.closed=false;this.beginChain=Promise.resolve();this.snapshotChain=Promise.resolve();this.retryDelayMs=250;this.uncertainWrite=null;}
+  constructor(id){this.id=id;this.pending=[];this.pendingBytes=0;this.flushPromise=null;this.timer=null;this.transaction=null;this.closed=false;this.boundaries=[];this.boundaryRunning=false;this.snapshotChain=Promise.resolve();this.retryDelayMs=250;this.uncertainWrite=null;}
   static async open(input){const result=await rpc('open',{input});return new Database(result.id);}
-  enqueue(sql,params=[]){if(this.closed)throw new Error('Database changed.');if(this.uncertainWrite)throw this.uncertainWrite;this.pending.push({sql:String(sql),params});if(this.pending.length>=32)this.flush().catch(e=>{this.error=e;});else if(!this.timer)this.timer=setTimeout(()=>{this.timer=null;this.flush().catch(e=>{this.error=e;});},4);}
+  enqueue(sql,params=[]){if(this.closed)throw new Error('Database changed.');if(this.uncertainWrite)throw this.uncertainWrite;const command={sql:String(sql),params};this.pending.push(command);this.pendingBytes+=commandBytes(command);if(this.pending.length>=BATCH_COMMANDS||this.pendingBytes>=BATCH_BYTES)this.flush().catch(e=>{this.error=e;});else if(!this.transaction&&!this.timer)this.timer=setTimeout(()=>{this.timer=null;this.flush().catch(e=>{this.error=e;});},4);}
   async retry(method,args,safe){
    for(let attempt=0;;attempt++)try{return await rpc(method,args);}catch(error){
     const permanent=/cancelled|canceled|invalid|unsupported|corrupt|malformed|syntax error|constraint failed|no such table|database changed|quota|disk.*full/i.test(error.message);
@@ -32,33 +34,38 @@
     await new Promise(resolve=>setTimeout(resolve,this.retryDelayMs*2**attempt));
    }
   }
-  boundary(operation){const result=this.beginChain.catch(()=>{}).then(operation);this.beginChain=result.catch(()=>{});return result;}
+  boundary(operation,priority=0){
+   const result=new Promise((resolve,reject)=>this.boundaries.push({operation,priority,resolve,reject}));
+   if(!this.boundaryRunning){this.boundaryRunning=true;Promise.resolve().then(async()=>{try{while(this.boundaries.length){this.boundaries.sort((a,b)=>b.priority-a.priority);const item=this.boundaries.shift();try{item.resolve(await item.operation());}catch(error){item.reject(error);}}}finally{this.boundaryRunning=false;}});}
+   return result;
+  }
   async flush(){
    clearTimeout(this.timer);this.timer=null;if(this.uncertainWrite)throw this.uncertainWrite;
    if(this.flushPromise){await this.flushPromise;if(this.pending.length)return this.flush();return;}
-   this.flushPromise=(async()=>{while(this.pending.length){const commands=this.pending.splice(0,32),token=this.transaction?.token;
+   this.flushPromise=(async()=>{while(this.pending.length){let count=0,bytes=0;while(count<this.pending.length&&count<BATCH_COMMANDS){const size=commandBytes(this.pending[count]);if(count&&bytes+size>BATCH_BYTES)break;bytes+=size;count++;}const commands=this.pending.splice(0,count),token=this.transaction?.token;this.pendingBytes=Math.max(0,this.pendingBytes-bytes);
     try{await this.retry('batch',{id:this.id,commands,token},error=>error.retrySafe===true);this.error=null;}
-    catch(error){this.pending.unshift(...commands);if(!error.retrySafe)this.uncertainWrite=error;throw error;}
+    catch(error){this.pending.unshift(...commands);this.pendingBytes+=bytes;if(!error.retrySafe)this.uncertainWrite=error;throw error;}
    }})();
    try{await this.flushPromise;}catch(error){this.error=error;throw error;}finally{this.flushPromise=null;}
   }
   async idle(){while(this.transaction)await this.transaction.done;await this.flush();}
-  async run(sql,params=[]){
+  async run(sql,params=[],options={}){
    sql=String(sql);
    if(/^\s*BEGIN\b/i.test(sql)){
-    await this.boundary(async()=>{await this.idle();let resolve;this.transaction={token:crypto.randomUUID(),done:new Promise(r=>resolve=r),resolve};try{await this.retry('begin',{id:this.id,token:this.transaction.token},error=>error.retrySafe===true);}catch(e){if(!e.retrySafe){try{await rpc('rollback',{id:this.id,token:this.transaction.token});}catch(_){this.uncertainWrite=e;}}this.transaction.resolve();this.transaction=null;throw e;}});return this;
+    await this.boundary(async()=>{await this.idle();let resolve;this.transaction={token:crypto.randomUUID(),done:new Promise(r=>resolve=r),resolve};try{await this.retry('begin',{id:this.id,token:this.transaction.token},error=>error.retrySafe===true);}catch(e){if(!e.retrySafe){try{await rpc('rollback',{id:this.id,token:this.transaction.token});}catch(_){this.uncertainWrite=e;}}this.transaction.resolve();this.transaction=null;throw e;}},options.priority||0);return this;
    }
    if(/^\s*(COMMIT|END|ROLLBACK)\b/i.test(sql)){
     const transaction=this.transaction;if(!transaction)throw new Error('No database transaction is active.');
-    try{if(/^\s*ROLLBACK\b/i.test(sql)){this.pending.length=0;if(this.flushPromise)try{await this.flushPromise;}catch(_){}this.pending.length=0;this.error=null;await rpc('rollback',{id:this.id,token:transaction.token});this.uncertainWrite=null;}else{await this.flush();await this.retry('commit',{id:this.id,token:transaction.token},error=>error.retrySafe===true);}}
-    catch(error){this.pending.length=0;if(!/^\s*ROLLBACK\b/i.test(sql)){try{await rpc('rollback',{id:this.id,token:transaction.token});this.uncertainWrite=null;}catch(_){this.uncertainWrite=error;}}else this.uncertainWrite=error;this.error=error;throw error;}
+    try{if(/^\s*ROLLBACK\b/i.test(sql)){this.pending.length=0;this.pendingBytes=0;if(this.flushPromise)try{await this.flushPromise;}catch(_){}this.pending.length=0;this.pendingBytes=0;this.error=null;await rpc('rollback',{id:this.id,token:transaction.token});this.uncertainWrite=null;}else{await this.flush();await this.retry('commit',{id:this.id,token:transaction.token},error=>error.retrySafe===true);}}
+    catch(error){this.pending.length=0;this.pendingBytes=0;if(!/^\s*ROLLBACK\b/i.test(sql)){try{await rpc('rollback',{id:this.id,token:transaction.token});this.uncertainWrite=null;}catch(_){this.uncertainWrite=error;}}else this.uncertainWrite=error;this.error=error;throw error;}
     finally{transaction.resolve();this.transaction=null;}return this;
    }
-   this.enqueue(sql,params);await this.flush();return this;
+   this.enqueue(sql,params);if(!this.transaction||this.flushPromise||this.pending.length>=BATCH_COMMANDS||this.pendingBytes>=BATCH_BYTES)await this.flush();return this;
   }
   async exec(sql,params=[]){await this.flush();sql=String(sql);return this.retry('query',{id:this.id,sql,params,token:this.transaction?.token},()=>/^\s*SELECT\b/i.test(sql));}
   prepare(sql){let params=[],cursor=null,row=null;const free=async()=>{if(cursor){const value=cursor;cursor=null;await rpc('cursorFree',{cursor:value});}row=null;};return{bind(value){if(cursor)throw new Error('Finish the previous query before rebinding.');params=value;},run:async value=>{await free();await this.run(sql,value||params);},step:async()=>{await this.flush();if(!cursor)cursor=await rpc('cursorOpen',{id:this.id,sql,params,token:this.transaction?.token});row=await rpc('cursorStep',{cursor});return row!==null;},get:()=>row,free};}
   async upgrade(schema){await this.idle();return rpc('upgrade',{id:this.id,schema});}
+  async retain(){return this.boundary(async()=>{await this.idle();return this.retry('recoveryPut',{id:this.id},()=>true);});}
   async exportBlob(){
    const result=this.snapshotChain.catch(()=>{}).then(async()=>{
     let copying;

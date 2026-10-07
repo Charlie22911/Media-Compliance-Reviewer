@@ -939,7 +939,7 @@
         scanExtensions: new Set(ALL_EXTENSIONS), visibleExtensions: new Set(ALL_EXTENSIONS),
         scanMode: 'deep', scanArchives: false, workerCount: 4, excludeUserApplicationData: true, skipOlderYears: 0, quickVideoHash: true,
         quickVideoThresholdMiB: 1, thumbSize: 210, thumbnailFit: 'fit', itemsPerPage: 60,
-        evidenceDatabaseLimitGb: 2.5, autoSaveMinutes: 1
+        evidenceDatabaseLimitGb: 2.5, autoSaveMinutes: 5
       }
     };
 
@@ -971,7 +971,7 @@
     obj.preferences.quickVideoHash = obj.preferences.quickVideoHash !== false;
     obj.preferences.quickVideoThresholdMiB = normalizeQuickVideoThresholdMiB(
       obj.preferences.quickVideoThresholdMiB);
-    obj.preferences.autoSaveMinutes = [1,5,15].includes(Number(obj.preferences.autoSaveMinutes)) ? Number(obj.preferences.autoSaveMinutes) : 1;
+    obj.preferences.autoSaveMinutes = 5;
     obj.preferences.thumbSize = Number(obj.preferences.thumbSize) || 210;
     obj.preferences.thumbnailFit = obj.preferences.thumbnailFit === 'fill' ? 'fill' : 'fit';
     obj.preferences.itemsPerPage = normalizePageSize(obj.preferences.itemsPerPage);

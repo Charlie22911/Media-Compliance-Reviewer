@@ -11,7 +11,10 @@
 - Coordinate preview decoding separately from parallel file hashing, check image headers before decoding, and retain placeholders after resource-limit failures.
 - Load card summaries and page duplicate locations in groups of 100; use the same matching location for display and inspection.
 - Report snapshot-copy progress through the Forge bridge and avoid retrying snapshots whose outcome is unknown.
-- Space automatic saves according to database size and save duration, add a minimum save interval in Maintenance, and reuse a saved snapshot for local recovery.
+- Save changed portable database files every five minutes, with manual saves and a final save when scanning ends.
+- Recover the committed browser working database directly in both editions, including its rollback journal, without preparing a separate recovery snapshot.
+- Buffer SQL writes within each item transaction in batches of up to 32 commands, targeting at most 2 MiB per batch; give queued review transactions priority.
+- Distinguish local saving from portable file saving, and keep audit history in SQL rows instead of rewriting it in progress metadata.
 - Stream matching report records to the chosen file; finish scanning before exporting. Download-only browsers receive numbered report parts.
 
 ## 3.3.0 — October 6, 2026

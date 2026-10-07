@@ -18,7 +18,7 @@ The main download includes its Forge wrapper, file-access prompts, database runt
 2. Choose **Select folder and scan**. Check the scan mode, file types, and exclusions, then choose **Choose folder and start scan**. You can select a local folder, mapped drive, or accessible network share. For a UNC path, paste the path into the Windows folder picker's address bar.
 3. Use **Review media while scan continues** to review early, or continue after scanning finishes. To continue an interrupted scan, choose **Resume scan** and reconnect the original folder if requested.
 4. Select items and choose a review action. Double-click a thumbnail or choose **Inspect** for a larger view, details, locations, and notes.
-5. Choose **Save database** and wait until the saving indicator disappears before closing the app or moving the database. Automatic saving is active when the app has permission to write the database. During scans, saves are spaced about a minute apart.
+5. Progress is saved in the browser as you work. The portable database file saves automatically every **five minutes** when changes are waiting and write access is available, and again when scanning ends. Choose **Save database** whenever you need an up-to-date file, then wait for saving to finish before moving it.
 
 Use the app's **Help** button for detailed instructions and **About** for the version, changelog, and decoder licenses.
 
@@ -46,7 +46,7 @@ Evidence preserves an encrypted original in the database and requires an Evidenc
 
 Use **Maintenance → Upgrade database** to update an older database format. Save an upgraded copy when requested. Maintenance also provides integrity checks and cleanup tools; read their descriptions before making permanent changes.
 
-The browser keeps a working copy locally. That storage is not a backup and may be removed when browser data is cleared. Keep regular copies of the saved portable database. The wrapped edition requires reopening the saved database; standalone browser recovery, when offered, uses a saved local snapshot.
+The browser keeps a working copy locally. Both editions offer **Recover browser database** when a saved working database is available. Recovery reopens the committed local data without copying the whole database. You can resume scanning after recovery; choose **Save database** to reconnect a portable file and enable its five-minute auto-save. Browser storage is not a backup and may be removed when browser data is cleared. Keep regular copies of the portable database.
 
 Allow enough disk space for the working copy and saved snapshots. Saved previews increase the database's size as the collection grows. Evidence capture checks the estimated total database size before adding an encrypted original. The default threshold is **2.5 GB**. To raise it, open **Maintenance → Database size limit for Evidence** and choose **5 GB**, then save the database. The choice is kept with that database. Normal scans can continue beyond this threshold while browser storage is available; existing records and previews are kept. Browser storage availability can impose a lower limit. Opening and saving large databases can take time; watch the progress indicators.
 
@@ -62,9 +62,11 @@ Large duplicate groups show a location count on the card. Inspect an item to bro
 
 ## Saving and report export
 
-**Maintenance → Minimum time between automatic saves** offers 1, 5, or 15 minutes. This is a minimum: larger databases and slower saves increase the spacing automatically. The database status shows the last successful portable-file save. Use **Save database** when you need a current copy before closing or moving it. Status totals can take a few seconds to catch up during scanning.
+The database status shows the last successful portable-file save. Use **Save database** when you need a current copy before closing or moving it. Status totals can take a few seconds to catch up during scanning.
 
-Saving prepares a consistent database copy in small steps. Scan and review writes can run between those steps, and the finished copy includes changes committed during copying. File writing then uses that saved copy. Individual storage operations can still cause short waits, especially on a slow disk. Watch **Activity** below Database for progress; status messages do not move the results. Standalone local recovery reuses the successful save's snapshot. Keep enough disk space for the working database, snapshots, and portable file.
+Routine changes use bounded batches of SQL writes in the browser's working database. Each completed media item's records and resume checkpoint commit together. Local progress metadata is saved about every five seconds, and recovery retains the working database directly. Queued bucket changes take priority over the next waiting scan transaction.
+
+The portable file saves every **five minutes** while changes are waiting; its interval is not increased for large databases. Saves do not overlap, and an active Evidence operation or report export can delay a file save. Manual saves and the end of a scan also update the file. A portable save still prepares and writes a complete database copy, with scan and review writes allowed between copy steps. Watch **Activity** for progress. **Saved locally** refers to browser storage; **file saved** shows the portable file's last save time. Allow enough disk space for the working database, the temporary export snapshot, and the portable file. Failed local saves appear in the database status and Log.
 
 Finish or cancel an active scan before choosing **Export report**. The report includes Non-compliant items and optionally password-protected Evidence. If Evidence was locked before export, it is locked again afterward. Choose a destination file; export writes records in batches, shows progress, and offers Cancel. Review changes wait until export finishes so its contents remain consistent. In browsers without a writable file picker, large reports download as numbered parts of roughly 8 MiB; allow multiple downloads and keep all parts. Parts already downloaded remain if you cancel later.
 

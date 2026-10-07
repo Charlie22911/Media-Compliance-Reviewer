@@ -19,9 +19,9 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     false,autoSaveError = '',evidenceOperationInFlight = false,activeEvidenceOperation = null,
     workspaceConflictBytes = null,workspaceConflictName = '',
     workspaceWriteChain = Promise.resolve(),dbSyncSnapshot = null,exportCache = null,
-    lastWorkspaceWriteAt = 0,recoveryEnabled =
-    !forgeRuntimeActive();
-  let upgradePending = false,databaseGeneration = 0,lastRecoveryWriteAt = 0,lastSnapshotDuration = 0,lastDatabaseBytes = 0,lastSaveDuration = 0,reportExportActive = false;
+    lastWorkspaceWriteAt = 0,recoveryEnabled = true;
+  let localSavedRevision = -1,localSaveError = '',recoveryPromise = null,autoSaveBaseline = Date.now();
+  let upgradePending = false,databaseGeneration = 0,lastRecoveryWriteAt = 0,lastDatabaseBytes = 0,reportExportActive = false;
   const fileByOccurrence = new Map();
   const directoryHandleByRoot = new Map();
   const renderedThumbnailUrls = new Set();
@@ -36,7 +36,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     EVIDENCE_DISPLAY_LIMIT = 128 * 1024 * 1024,DRAG_THRESHOLD = 6,VAULT_ITERATIONS = 250000,
     VAULT_CHECK_TEXT =
     'ImageComplianceReviewer evidence vault v1';
-  const AUTO_SAVE_MIN_INTERVAL = 60000,PREVIEW_TIMEOUT = 15000,
+  const AUTO_SAVE_MIN_INTERVAL = 5 * 60000,LOCAL_SAVE_INTERVAL = 5000,PREVIEW_TIMEOUT = 15000,
     WORKSPACE_WRITE_CHUNK_BYTES = 1024 * 1024;
   const pathMeasureCanvas = document.createElement('canvas'),pathMeasureContext =
     pathMeasureCanvas.getContext('2d');
@@ -281,8 +281,9 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
 
     fragment.append(a);
     const saveState = document.createElement('span');
-    saveState.textContent = workspaceWritable ? ' · Auto-save active' :
-    ' · Save once to enable auto-save';
+    saveState.textContent = localSaveError ? ' · local save failed' :
+    lastRecoveryWriteAt ? localSavedRevision === changeRevision ? ' · saved locally' : ' · saving locally' : ' · preparing local recovery';
+    saveState.title = localSaveError;
     fragment.append(saveState);
     if (bytes > evidenceDatabaseLimitBytes()) {
       const w = document.createElement('span');
@@ -293,10 +294,11 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     if (dirty) {
       const b = document.createElement('span');
       b.className = 'unsaved';
-      b.textContent = ' · unsaved changes';
+      b.textContent = ' · database file needs saving';
       fragment.append(b);
     }
-    if (lastWorkspaceWriteAt) {const last=document.createElement('span');last.textContent=' · last saved '+new Date(lastWorkspaceWriteAt).toLocaleTimeString();fragment.append(last);}
+    if (lastWorkspaceWriteAt) {const last=document.createElement('span');last.textContent=' · file saved '+new Date(lastWorkspaceWriteAt).toLocaleTimeString();fragment.append(last);}
+    const interval=document.createElement('span');interval.textContent=workspaceWritable?' · file auto-save: 5 minutes':' · choose Save database to enable file auto-save';fragment.append(interval);
     if (autoSaveError) {
       const e = document.createElement('span');
       e.className = 'unsaved';
@@ -508,25 +510,25 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     workspace.catalogNormalized = true;await initializePreviewBudget();
   }
 
-  function workspaceDbTables() {
-    const roots = new Map(Object.values(ws.roots).map((root) => [root.id, [
+  function workspaceDbTables(workspace = ws) {
+    const roots = new Map(Object.values(workspace.roots).map((root) => [root.id, [
     root.id, root.label, root.pathLabel || '', root.pathProvenance || 'user-supplied']]
     ));
-    const scans = new Map(Object.values(ws.scans).map((scan) => [scan.id, [
+    const scans = new Map(Object.values(workspace.scans).map((scan) => [scan.id, [
     scan.id, scan.rootId, scan.startedAt, scan.completedAt || null,
     scan.completed ? 1 : 0, JSON.stringify({
       mode: scan.scanMode || 'custom', extensions: scan.includedExtensions || [],
-      rootKind: scan.rootKind || ws.roots[scan.rootId]?.kind || 'standard',
+      rootKind: scan.rootKind || workspace.roots[scan.rootId]?.kind || 'standard',
       scanArchives: Boolean(scan.scanArchives), exclusions: scan.exclusions || [],
       quickVideoHash: scan.quickVideoHash !== false,
       quickVideoThresholdMiB: scan.quickVideoThresholdMiB || 1
     }), JSON.stringify(scan.errors || [])]]
     ));
-    const events = new Map(ws.events.map((event) => [event.id, [
+    const events = new Map(workspace.events.map((event) => [event.id, [
     event.id, event.decisionKey, event.previousStatus, event.newStatus, event.at,
     event.reviewer || '', event.notes || '', event.bulkId || null]]
     ));
-    const maintenance = new Map(ws.maintenanceEvents.map((event) => [event.id, [
+    const maintenance = new Map(workspace.maintenanceEvents.map((event) => [event.id, [
     event.id, event.action, event.at, event.reviewer || '',
     JSON.stringify(event.details || {})]]
     ));
@@ -542,20 +544,23 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   async function syncDb() {
     if (!db) return;
+    const database = db,workspace = ws;
     const nextSnapshot = new Map();
     let databaseChanged = !dbSyncSnapshot;
-    await db.run('BEGIN');
+    await database.run('BEGIN');
     try {
-      const json = JSON.stringify(C.serializeWorkspace(ws)),tables = workspaceDbTables();
-      await db.run(C.SQL_STATEMENTS.upsertWorkspace, ['workspace_json', json]);
+      if(database!==db||workspace!==ws)throw new Error('Database changed before saving metadata.');
+      // Audit history already lives in SQL rows. Do not rewrite it in the
+      // metadata JSON on every small progress checkpoint.
+      const json = JSON.stringify(C.serializeWorkspace({...workspace,events:[],maintenanceEvents:[]})),tables = workspaceDbTables(workspace);
+      await database.run(C.SQL_STATEMENTS.upsertWorkspace, ['workspace_json', json]);
       for (const [name, keyColumn, insertSql, rows] of tables) {
         const previous = dbSyncSnapshot?.get(name) || new Map(),changes =
           C.diffRowSnapshots(previous, rows);
-        if (!dbSyncSnapshot) await db.run(`DELETE FROM ${name}`);
-        for (const key of changes.deletes) await db.run(
+        for (const key of changes.deletes) await database.run(
           `DELETE FROM ${name} WHERE ${keyColumn}=?`, [key]);
         if (changes.upserts.length) {
-          const statement = db.prepare(insertSql);
+          const statement = database.prepare(insertSql);
           try {
             await MediaDatabase.arrayForEach(changes.upserts, async (item) => await statement.run(item.row));
           } finally
@@ -566,13 +571,12 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         if (changes.upserts.length || changes.deletes.length) databaseChanged = true;
         nextSnapshot.set(name, changes.snapshot);
       }
-      await db.run('COMMIT');
-      dbSyncSnapshot = nextSnapshot;
-      if (databaseChanged) exportCache = null;
+      await database.run('COMMIT');
+      if(database===db&&workspace===ws){dbSyncSnapshot = nextSnapshot;if (databaseChanged) exportCache = null;}
     }
     catch (error) {
       try {
-        await db.run('ROLLBACK');
+        await database.run('ROLLBACK');
       }
       catch (_) {
       }
@@ -583,7 +587,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     do {await databaseClient.waitForTransaction();} while (databaseClient.transactionOpen);
     await syncDb();
     const revision = changeRevision;
-    const started=Date.now();const snapshot=await databaseClient.snapshot(revision);lastSnapshotDuration=Date.now()-started;lastDatabaseBytes=snapshot.size;return snapshot;
+    const snapshot=await databaseClient.snapshot(revision);lastDatabaseBytes=snapshot.size;return snapshot;
   }
   async function loadDb(bytes, closeWorkspaceDialog = true) {
     assertNoEvidenceOperation('open a database');
@@ -608,7 +612,16 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         }
       }
       loaded.events = [...events.values()];
+      const maintenance = new Map((loaded.maintenanceEvents||[]).map(event=>[event.id,event]));
+      let lastMaintenanceRow=0;
+      for(;;){
+        const rows=(await candidate.exec('SELECT rowid,id,action,at,reviewer,details_json FROM maintenance_events WHERE rowid>? ORDER BY rowid LIMIT 128',[lastMaintenanceRow]))[0]?.values||[];
+        if(!rows.length)break;
+        for(const [rowid,id,action,at,reviewer,details] of rows){lastMaintenanceRow=rowid;maintenance.set(id,{id,action,at,reviewer,details:JSON.parse(details||'{}')});}
+      }
+      loaded.maintenanceEvents=[...maintenance.values()];
     } catch (error) {await candidate.close();throw error;}
+    if(recoveryPromise)try{await recoveryPromise;}catch(_){}
     await db?.close();
     db = candidate;
     upgradePending = migration.upgraded;
@@ -623,7 +636,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     changeRevision = 0;
     dbSyncSnapshot = null;
     exportCache = null;
-    lastWorkspaceWriteAt = 0;lastRecoveryWriteAt=0;lastSnapshotDuration=0;lastSaveDuration=0;lastDatabaseBytes=0;
+    lastWorkspaceWriteAt = 0;lastRecoveryWriteAt=0;lastDatabaseBytes=0;autoSaveBaseline=Date.now();
     autoSaveError = '';
     vaultKey = null;cancelPreviewJobs();
     evidenceMetadataCache.clear();
@@ -631,6 +644,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     evidencePreviewCache.clear();
     await clearWorkspaceConflict();
     workspaceLoadedFromFile = true;recoveryBytes = null;
+    localSavedRevision = -1;localSaveError = '';
+    await persistRecovery();
     await $('#startup-recover').classList.add('hidden');
     fileByOccurrence.clear();
     directoryHandleByRoot.clear();
@@ -646,12 +661,11 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   let recoveryTimer = null,recoveryDueAt = 0,recoveryInFlight = false,recoveryQueued = false;
   function automaticSaveInterval() {
-    const minimum = [1,5,15].includes(Number(ws.preferences.autoSaveMinutes)) ? Number(ws.preferences.autoSaveMinutes) * 60000 : AUTO_SAVE_MIN_INTERVAL;
-    return Math.max(minimum, Math.min(30*60000, Math.max(lastSnapshotDuration,lastSaveDuration)*4), Math.min(15*60000,Math.ceil(lastDatabaseBytes/(512*1024*1024))*60000));
+    return AUTO_SAVE_MIN_INTERVAL;
   }
   function scheduleRecovery(delay = 650) {
-    if (!recoveryEnabled || workspaceWritable && !autoSaveError) return;
-    delay = Math.max(delay, automaticSaveInterval() - (Date.now() - Math.max(lastRecoveryWriteAt,lastWorkspaceWriteAt)));
+    if (!recoveryEnabled || !workspaceLoadedFromFile || !db) return;
+    delay = Math.max(delay, LOCAL_SAVE_INTERVAL - (Date.now() - lastRecoveryWriteAt));
     if (recoveryInFlight) {
       recoveryQueued = true;
       return;
@@ -663,11 +677,12 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     recoveryTimer = setTimeout(async () => {
       recoveryTimer = null;
       recoveryDueAt = 0;
-      await persistRecovery();
+      try {await persistRecovery();} catch (_) {scheduleRecovery(10000);}
     }, Math.max(0, requestedAt - Date.now()));
   }
   async function persistRecovery() {
-    if (!recoveryEnabled) return;
+    if (!recoveryEnabled || !workspaceLoadedFromFile || !db) return;
+    if (recoveryInFlight) {await recoveryPromise;return persistRecovery();}
     if (evidenceOperationInFlight || reportExportActive) {
       scheduleRecovery(10000);
       return;
@@ -675,24 +690,30 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     recoveryInFlight = true;
     recoveryQueued = false;
     const workspaceId = ws.id,database = db,revision = changeRevision;
+    const current = () => ws.id === workspaceId && db === database;
     try {
-      const recover = async () => {if (ws.id === workspaceId && db === database) {await idbPut(await exportWorkspaceBytes());lastRecoveryWriteAt=Date.now();}};
-      workspaceWriteChain = workspaceWriteChain.catch(() => {}).then(recover);
-      await workspaceWriteChain;
+      recoveryPromise = (async () => {
+        await syncDb();
+        if (!current()) return;
+        await database.retain();
+        if (current()) {lastRecoveryWriteAt=Date.now();localSavedRevision=revision;localSaveError='';}
+      })();
+      await recoveryPromise;
     }
     catch (e) {
-      recoveryEnabled = false;
-      if (!forgeRuntimeActive()) toast('Browser recovery failed: ' + e.message, true);
+      if (current()) {if(localSaveError!==e.message)toast('Local save failed: ' + e.message, true);localSaveError=String(e.message||e);}
+      throw e;
     } finally
     {
-      recoveryInFlight = false;finishOperation('Saving database');
+      recoveryInFlight = false;recoveryPromise = null;requestWorkspaceState();
       if (recoveryEnabled && (recoveryQueued || workspaceId !== ws.id || database !== db ||
       revision !== changeRevision)) scheduleRecovery();
     }
   }
   function scheduleAutoSave(delay = 1000) {
-    if (!workspaceWritable || !workspaceFileHandle?.createWritable) return;
-    const elapsed = Date.now() - lastWorkspaceWriteAt,remaining =
+    if (!dirty || !workspaceWritable || !workspaceFileHandle?.createWritable) return;
+    if(autoSaveInFlight){autoSaveQueued=true;return;}
+    const elapsed = Date.now() - Math.max(lastWorkspaceWriteAt,autoSaveBaseline),remaining =
       Math.max(0, automaticSaveInterval() - elapsed),dueAt = Date.now() +
       Math.max(delay, remaining);
     if (autoSaveTimer && autoSaveDueAt <= dueAt) return;
@@ -705,7 +726,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     }, Math.max(0, dueAt - Date.now()));
   }
   async function autoSaveWorkspace() {
-    if (!workspaceWritable || !workspaceFileHandle?.createWritable) return;
+    if (!dirty || !workspaceWritable || !workspaceFileHandle?.createWritable) return;
     if (evidenceOperationInFlight || reportExportActive) {
       autoSaveQueued = true;
       return;
@@ -735,17 +756,6 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       if (autoSaveQueued || dirty) scheduleAutoSave();
       if(autoSaveError)scheduleRecovery();
     }
-  }
-  function idbOpen() {
-    if (!recoveryEnabled || !globalThis.indexedDB) return Promise.reject(new Error(
-      'Browser recovery storage is unavailable.'));
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open('ImageComplianceReviewer', 1);
-      req.onupgradeneeded = () => req.result.createObjectStore('recovery');
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    }
-    );
   }
   function sourceHandleDb() {
     if (!globalThis.indexedDB) return Promise.reject(new Error(
@@ -805,7 +815,6 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
 
       // Reconnect remains available when local handles cannot be restored.
     } finally {await database?.close();}}
-  async function idbPut(snapshot) {try {await MediaDatabase.rpc('recoveryPut', { token: snapshot.token });} finally {await snapshot.release();}}
   async function idbGet() {return MediaDatabase.rpc('recoveryGet');}
   async function hasThumbnail(hash) {
     if (!db) return false;
@@ -2606,7 +2615,6 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       toast('Finish the active operation before opening maintenance.', true);return;
     }
     if (!db) return;
-    $('#auto-save-minutes').value = String(ws.preferences.autoSaveMinutes || 1);
     $('#evidence-database-limit').value = String(evidenceDatabaseLimitGb());
     agedPreviewKeys = [];
     lastMaintenancePlan = null;
@@ -3568,8 +3576,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   async function openScanDialog(rootId = null, options = {
   })
   {
-    if (!workspaceWritable || !workspaceFileHandle?.createWritable) {
-      toast('Open or create a writable SQLite database before scanning.', true);
+    if (!workspaceLoadedFromFile || !lastRecoveryWriteAt || localSaveError) {
+      toast('Open, create, or recover a database before scanning.', true);
       if (!$('#workspace-dialog').open) $('#workspace-dialog').showModal();
       return;
     }
@@ -3905,6 +3913,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     } finally
     {
       $('#folder-input').disabled = false;
+      try {await persistRecovery();} catch (_) {scheduleRecovery(10000);}
     }
   }
   async function startScan(entries, options = {
@@ -4009,7 +4018,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     ws.scans[scanId] = scan;
     await setDirty();
     try {
-      await writeWorkspaceHandle(workspaceFileHandle, true);
+      await persistRecovery();
     }
     catch (error) {
       setScanUiState('error', {
@@ -4508,7 +4517,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     let transaction = null,committed = false;
     reviewWriteInFlight = true;reviewRevision++;
     try {
-      await database.run('BEGIN');transaction = database.transaction;
+      await database.run('BEGIN', [], {priority:1});transaction = database.transaction;
       if (database !== db || workspace !== ws) throw new Error('Database changed before the review action.');
       for (const key of keys) {
         const d = await ws.decisions[key];if (!d) throw new Error('Selected item is no longer in this database.');
@@ -5440,6 +5449,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     assertNoEvidenceOperation('create a database');
     const initialVersion = await workspaceFileVersion(await handle.getFile());
     assertNoEvidenceOperation('create a database');
+    if(recoveryPromise)try{await recoveryPromise;}catch(_){}
     await db?.close();
     db = await new SQL.Database();
     await initSchema();
@@ -5452,10 +5462,11 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     await db.upgrade(MEDIA_DATABASE_SCHEMA);attachDatabaseClient(db);await installCatalog(ws);await initializePreviewBudget();
     dbSyncSnapshot = null;
     exportCache = null;
-    lastWorkspaceWriteAt = 0;lastRecoveryWriteAt=0;lastSnapshotDuration=0;lastSaveDuration=0;lastDatabaseBytes=0;
+    lastWorkspaceWriteAt = 0;lastRecoveryWriteAt=0;lastDatabaseBytes=0;autoSaveBaseline=Date.now();
     workspaceFileHandle = handle;
     workspaceWritable = false;
     workspaceLoadedFromFile = true;
+    localSavedRevision = -1;localSaveError = '';
     vaultKey = null;
     evidenceMetadataCache.clear();
     evidencePreviewCache.forEach((preview) => preview.bytes.fill(0));
@@ -5472,6 +5483,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     changeRevision = 0;
     await setDirty();
     await renderAll();
+    await persistRecovery();
     await writeWorkspaceHandle(handle, true);
     await $('#workspace-dialog').close();
     toast('Database created. Automatic scan checkpoints are active.');
@@ -5538,6 +5550,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     workspaceFileVersions.set(handle, fileVersion);
     workspaceFileHandle = handle;
     workspaceWritable = permission === 'granted';
+    lastWorkspaceWriteAt = file.lastModified || 0;autoSaveBaseline = Date.now();
     if (dirty) scheduleAutoSave(0);
     if (!workspaceWritable && handle.createWritable) await writeWorkspaceHandle(handle, true);
     if (!workspaceWritable) throw new Error('The selected database could not be opened for writing.');
@@ -5581,9 +5594,11 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       db === database;
       if (!isCurrent()) throw new Error(
         'A queued database save was cancelled because another database is active.');
+      if(quiet&&!dirty&&workspaceWritable&&!upgradePending)return lastDatabaseBytes;
       await assertWorkspaceFileUnchanged(handle, async () => await exportWorkspaceBytes(), isCurrent);
+      try {await persistRecovery();} catch(error) {logActivity('warning','Local recovery could not be updated before the file save',error.message);}
       showOperation('Saving database', 'Preparing snapshot');await yieldPaint();
-      const saveStarted=Date.now(),revision = changeRevision,bytes = await exportWorkspaceBytes();
+      const revision = changeRevision,bytes = await exportWorkspaceBytes();
       let writable;
       try {
         if (!isCurrent()) throw new Error('Database changed during save.');
@@ -5595,7 +5610,6 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         }
         showOperation('Saving database', 'Finalizing');
         await writable.close();
-        if(recoveryEnabled){try{await MediaDatabase.rpc('recoveryPut',{token:bytes.token});lastRecoveryWriteAt=Date.now();}catch(error){logActivity('warning','Local recovery snapshot could not be retained',error.message);}}
       }
       catch (error) {
         try {
@@ -5612,7 +5626,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       workspaceFileVersions.set(handle,
       await workspaceFileVersion(await handle.getFile()));
       if (isCurrent()) {
-        lastWorkspaceWriteAt = Date.now();lastSaveDuration=Date.now()-saveStarted;
+        lastWorkspaceWriteAt = Date.now();
         await clearWorkspaceConflict();
         workspaceWritable = true;upgradePending = false;
         if (revision === changeRevision) dirty = false;
@@ -6104,9 +6118,6 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     const url = URL.createObjectURL(new Blob([logText()],{type:'text/plain;charset=utf-8'})),link = document.createElement('a');
     link.href = url;link.download = 'media-reviewer-log-' + new Date().toISOString().slice(0,10) + '.txt';link.click();setTimeout(() => URL.revokeObjectURL(url),1000);
   });
-  $('#auto-save-minutes').addEventListener('change', async event => {
-    ws.preferences.autoSaveMinutes=Number(event.target.value);clearTimeout(autoSaveTimer);autoSaveTimer=null;autoSaveDueAt=0;await setDirty();
-  });
   $('#export-report').addEventListener('click', exportReport);
   $$('#export-evidence,[data-export-evidence]').forEach((button) => button.addEventListener('click', async () => await prepareEvidenceExport([...selected])));
   $('#evidence-export-start').addEventListener('click', async () => await
@@ -6314,14 +6325,10 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       await setDirty();
       await renderWorkspaceState();
       $('#startup-status').textContent =
-      'Recovered browser data. Choose where to save its writable database.';
-      await saveWorkspace();
-      if (workspaceWritable) {
-        await $('#workspace-dialog').close();
-        toast('Browser copy recovered. Automatic scan checkpoints are active.');
-      } else
-      $('#startup-status').textContent =
-      'Recovery remains open until a writable database is selected.';
+      'Recovered browser data. Choose Save database to reconnect its portable file.';
+      await persistRecovery();
+      await $('#workspace-dialog').close();
+      toast('Browser database recovered. You can resume scanning. Choose Save database to reconnect a file for five-minute auto-save.');
     }
     catch (e) {
       $('#startup-status').textContent = 'Recovery failed: ' + e.message;
@@ -6376,9 +6383,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       recoveryBytes = await idbGet();
       if (recoveryBytes) $('#startup-recover').classList.remove('hidden');
     }
-    catch (_) {
-      recoveryEnabled = false;
-    }
+    catch (error) {logActivity('warning','Saved browser database could not be listed',error.message);}
     await renderAll();
     $('#workspace-dialog').showModal();
   }

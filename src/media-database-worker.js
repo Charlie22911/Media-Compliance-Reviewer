@@ -25,13 +25,22 @@ async function boot(){
 async function cleanupAbandonedFiles(){
  await navigator.locks.request('photo-audit-database-storage-maintenance',async()=>{
   const tx=storage.transaction('metadata'),rows=await request(tx.objectStore('metadata').getAll()),pointer=rows.find(row=>row.name==='/recovery-pointer'),owners=new Map();
-  for(const row of rows){if(!row._mediaSession||row.name===pointer?.snapshotPath)continue;const files=owners.get(row._mediaSession)||[];files.push(row.name);owners.set(row._mediaSession,files);}
+  for(const row of rows){if(!row._mediaSession||row.name===pointer?.snapshotPath||isWorkingFile(row.name,pointer?.workingPath))continue;const files=owners.get(row._mediaSession)||[];files.push(row.name);owners.set(row._mediaSession,files);}
   for(const [owner,files]of owners){if(owner===sessionId)continue;await navigator.locks.request('photo-audit-database-session:'+owner,{ifAvailable:true},async lock=>{if(lock)for(const path of files)await removeFile(path);});}
  });
 }
 async function removeFile(path){
  const tx=storage.transaction(['metadata','blocks'],'readwrite');const done=complete(tx);
  tx.objectStore('metadata').delete(path);tx.objectStore('blocks').delete(IDBKeyRange.bound([path,-Infinity],[path,Infinity]));await done;
+}
+function isWorkingFile(name,path){return Boolean(path)&&(name===path||name===path+'-journal'||name===path+'-wal'||name===path+'-shm');}
+async function recoveryPointer(){return request(storage.transaction('metadata').objectStore('metadata').get('/recovery-pointer'));}
+async function removeWorkingFiles(path){
+ const rows=await request(storage.transaction('metadata').objectStore('metadata').getAll());
+ for(const row of rows)if(isWorkingFile(row.name,path))await removeFile(row.name);
+}
+async function releaseWorkingFile(path){
+ if((await recoveryPointer())?.workingPath!==path)await removeWorkingFiles(path);
 }
 async function importFile(path,input){
  const blob=input instanceof Blob?input:new Blob([input]);
@@ -125,10 +134,30 @@ class Database {
    await removeFile(path);error.retrySafe=true;throw error;
   }
  }
- async close(){await this.clear();if(this.pointer)await sqlite.close(this.pointer);await removeFile(this.path);databases.delete(this.id);}
+ async close(){await this.clear();if(this.pointer){await sqlite.close(this.pointer);this.pointer=null;}databases.delete(this.id);await releaseWorkingFile(this.path);}
 }
 const actions={
- async open({input}){await boot();const id=crypto.randomUUID(),path='/work-'+crypto.randomUUID()+'.sqlite';let db;try{if(input?.snapshot){const value=snapshots.get(input.snapshot);if(!value)throw new Error('Recovery snapshot unavailable.');await copyFile(value.path,path);}else await importFile(path,input||new Blob());const pointer=await sqlite.open_v2(path,SQLite.SQLITE_OPEN_READWRITE|SQLite.SQLITE_OPEN_CREATE,'media-idb');db=new Database(id,path,pointer);databases.set(id,db);await db.run('PRAGMA cache_size=-8192; PRAGMA temp_store=FILE; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');return{id};}catch(e){try{if(db)await db.close();else await removeFile(path);}catch(_){}databases.delete(id);throw e;}},
+ async open({input}){
+  await boot();const id=crypto.randomUUID(),recovering=Boolean(input?.workingPath),path=recovering?input.workingPath:'/work-'+crypto.randomUUID()+'.sqlite';let db;
+  try{
+   const open=async()=>{const pointer=await sqlite.open_v2(path,SQLite.SQLITE_OPEN_READWRITE|(recovering?0:SQLite.SQLITE_OPEN_CREATE),'media-idb');db=new Database(id,path,pointer);databases.set(id,db);};
+   if(recovering){
+    // Claim the existing file before another window can recover or clean it up.
+    await navigator.locks.request('photo-audit-database-storage-maintenance',async()=>{
+     if((await recoveryPointer())?.workingPath!==path)throw new Error('The saved browser database has changed. Reopen the app.');
+     const meta=await request(storage.transaction('metadata').objectStore('metadata').get(path));
+     if(!meta)throw new Error('The saved browser database is no longer available.');
+     if([...databases.values()].some(value=>value.path===path))throw new Error('This browser database is already open.');
+     if(meta._mediaSession&&meta._mediaSession!==sessionId)await navigator.locks.request('photo-audit-database-session:'+meta._mediaSession,{ifAvailable:true},lock=>{if(!lock)throw new Error('This browser database is open in another window. Close that window first.');});
+     await open();
+    });
+   }else{
+    if(input?.snapshot){const value=snapshots.get(input.snapshot);if(!value)throw new Error('Recovery snapshot unavailable.');await copyFile(value.path,path);}else await importFile(path,input||new Blob());
+    await open();
+   }
+   await db.run('PRAGMA cache_size=-8192; PRAGMA temp_store=FILE; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');return{id};
+  }catch(e){try{if(db)await db.close();else if(!recovering)await removeWorkingFiles(path);}catch(_){}databases.delete(id);throw e;}
+ },
  async query({id,sql,params,token}){const db=databases.get(id);if(db.transaction&&db.transaction!==token)throw new Error('Database transaction is busy.');return db.exec(sql,params);},
  async cursorOpen({id,sql,params,token}){const db=databases.get(id);if(db.transaction&&db.transaction!==token)throw new Error('Database transaction is busy.');let statement;for await(const stmt of sqlite.statements(db.pointer,sql,{unscoped:true})){if(statement){await sqlite.finalize(stmt);await sqlite.finalize(statement);throw new Error('Only one streaming query is allowed.');}statement=stmt;}if(!statement)throw new Error('Empty streaming query.');try{sqlite.bind_collection(statement,params||[]);}catch(error){await sqlite.finalize(statement);throw error;}const cursor=crypto.randomUUID();cursors.set(cursor,{id,statement});return cursor;},
  async cursorStep({cursor}){const value=cursors.get(cursor);if(!value)return null;if(await sqlite.step(value.statement)===SQLite.SQLITE_ROW)return sqlite.row(value.statement);await actions.cursorFree({cursor});return null;},
@@ -151,8 +180,22 @@ const actions={
  async snapshot({id}){return databases.get(id).snapshot(activeRequestId);},
  async read({token,start,end}){const value=snapshots.get(token);if(!value)throw new Error('Database snapshot expired.');return readFile(value.path,start,Math.min(end,value.size));},
  async release({token}){const value=snapshots.get(token);if(value&&!value.retained){snapshots.delete(token);await removeFile(value.path);}},
- async recoveryPut({token}){await boot();const value=snapshots.get(token);if(!value)throw new Error('Recovery snapshot expired.');const prior=await actions.recoveryGet();const tx=storage.transaction('metadata','readwrite'),done=complete(tx);tx.objectStore('metadata').put({name:'/recovery-pointer',snapshotPath:value.path,size:value.size,token});await done;value.retained=true;if(prior&&prior.token!==token){const old=snapshots.get(prior.token);if(old){old.retained=false;await actions.release({token:prior.token});}}},
- async recoveryGet(){await boot();const tx=storage.transaction('metadata'),value=await request(tx.objectStore('metadata').get('/recovery-pointer'));if(!value)return null;snapshots.set(value.token,{path:value.snapshotPath,size:value.size,retained:true});return{token:value.token,size:value.size};},
+ async recoveryPut({id}){
+  await boot();const db=databases.get(id);if(!db)throw new Error('Database changed.');if(db.transaction)throw new Error('Finish the active transaction before saving its recovery pointer.');
+  await navigator.locks.request('photo-audit-database-storage-maintenance',async()=>{
+   const prior=await recoveryPointer(),tx=storage.transaction('metadata','readwrite',{durability:'strict'}),done=complete(tx);
+   tx.objectStore('metadata').put({name:'/recovery-pointer',workingPath:db.path,updatedAt:Date.now()});await done;
+   // Retain the live committed pages and their rollback journal, never a full copy.
+   if(prior?.workingPath&&prior.workingPath!==db.path&&![...databases.values()].some(value=>value.path===prior.workingPath))try{await removeWorkingFiles(prior.workingPath);}catch(_){}
+   if(prior?.snapshotPath)try{snapshots.delete(prior.token);await removeFile(prior.snapshotPath);}catch(_){}
+  });
+ },
+ async recoveryGet(){
+  await boot();const value=await recoveryPointer();if(!value)return null;
+  if(value.workingPath){const meta=await request(storage.transaction('metadata').objectStore('metadata').get(value.workingPath));return meta?{workingPath:value.workingPath,size:meta.fileSize,updatedAt:value.updatedAt}:null;}
+  // Older versions retained snapshots. They can still be recovered once.
+  snapshots.set(value.token,{path:value.snapshotPath,size:value.size,retained:true});return{token:value.token,size:value.size};
+ },
  async close({id}){const backup=backups.get(id);if(backup)await finishBackup(backup,new Error('Database changed during save.'));for(const [cursor,value]of cursors)if(value.id===id)await actions.cursorFree({cursor});await databases.get(id)?.close();},
  async diagnostics(){return{backend:'IndexedDB pages',databaseCopies:databases.size,wasmBytes:engine.HEAPU8.buffer.byteLength,statementCount:[...databases.values()].reduce((n,db)=>n+db.cache.size,0)};}
 };
