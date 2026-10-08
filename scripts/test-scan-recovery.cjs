@@ -24,7 +24,7 @@ function make(rpc){const c={crypto:require('crypto').webcrypto,TextEncoder,TextD
  const worker=fs.readFileSync(path.join(base,'src/media-database-worker.js'),'utf8'),batchStart=worker.indexOf(' async batch({id,commands,token})'),batchEnd=worker.indexOf(' async upgrade(',batchStart);
  const native=new DatabaseSync(':memory:');native.exec('CREATE TABLE records(id PRIMARY KEY); BEGIN; INSERT INTO records VALUES (0)');let failuresLeft=3;
  const workerDb={transaction:'tx',async run(sql,params=[]){if(sql==='INSERT INTO records VALUES (2)'&&failuresLeft-->0)throw Error('Temporary storage write failure');if(params.length)native.prepare(sql).run(...params);else native.exec(sql);}};
- const server={databases:new Map([['id',workerDb]])};vm.createContext(server);vm.runInContext('globalThis.batch=({'+worker.slice(batchStart,batchEnd)+'}).batch;',server);
+ const server={databases:new Map([['id',workerDb]])};vm.createContext(server);vm.runInContext(/function getDatabase\(id\)\{[^\n]+/.exec(worker)[0]+'\nglobalThis.batch=({'+worker.slice(batchStart,batchEnd)+'}).batch;',server);
  let partialAttempts=0;
  const partial=make(async(method,args)=>{if(method==='batch'){partialAttempts++;return server.batch(args);}return[];}),partialDb=new partial.MediaDatabase.Database('id');partialDb.transaction={token:'tx'};partialDb.retryDelayMs=0;
  partialDb.enqueue('INSERT INTO records VALUES (1)');partialDb.enqueue('INSERT INTO records VALUES (2)');await partialDb.flush();

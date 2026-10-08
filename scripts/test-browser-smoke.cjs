@@ -16,6 +16,7 @@ const scanFolderShim=`(async()=>{
  const directory=(name,children)=>({kind:'directory',name,queryPermission:async()=> 'granted',requestPermission:async()=> 'granted',isSameEntry:async other=>other?.name===name,async *entries(){for(const child of children)yield[child.name,child];},async *values(){for(const child of children)yield child;},async getDirectoryHandle(name){const child=children.find(child=>child.name===name&&child.kind==='directory');if(!child)throw new DOMException('Missing directory','NotFoundError');return child;},async getFileHandle(name){const child=children.find(child=>child.name===name&&child.kind==='file');if(!child)throw new DOMException('Missing file','NotFoundError');return child;}});
  const root=directory('HomeShare',[directory('bravo.last',[file(new File([first],'duplicate.png',{type:'image/png',lastModified:modified})),file(third)]),directory('alpha.first',[file(first),file(second),file(new File(['skip'],'ignored.txt',{lastModified:modified})),directory('Application Data',[file(await png('excluded.png','black'))])])]);window.showDirectoryPicker=async()=>root;
 })();`;
+const slowStartupShim=`(()=>{const NativeWorker=window.Worker;window.__testWorkers=[];window.__testDelayedOpen=false;window.Worker=class extends NativeWorker{constructor(...args){super(...args);window.__testWorkers.push(this);}postMessage(message,...rest){if(message.method==='open'&&!window.__testDelayedOpen){window.__testDelayedOpen=true;setTimeout(()=>super.postMessage(message,...rest),1000);}else super.postMessage(message,...rest);}};})();`;
 (async()=>{
  chrome=spawn(process.env.MEDIA_REVIEWER_TEST_BROWSER||'C:/Program Files/Google/Chrome/Application/chrome.exe',['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-background-networking','--disable-component-update','--remote-debugging-port=0','--user-data-dir='+profile,'about:blank'],{windowsHide:true,stdio:['ignore','ignore','pipe']});
  chrome.stderr.on('data',chunk=>stderr+=chunk);chrome.on('error',error=>errors.push(String(error)));
@@ -31,13 +32,15 @@ const scanFolderShim=`(async()=>{
  const results=[];
  for(const edition of process.argv.includes('--forge-only')?['Media-Compliance-Reviewer.html']:['Media-Compliance-Reviewer-Standalone.html','Media-Compliance-Reviewer.html']){
   const {targetId}=await call('Target.createTarget',{url:'about:blank'}),{sessionId}=await call('Target.attachToTarget',{targetId,flatten:true});
-  await call('Runtime.enable',{},sessionId);await call('Page.enable',{},sessionId);await call('Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:false,flatten:true},sessionId);await call('Page.navigate',{url:pathToFileURL(path.join(root,edition)).href},sessionId);
+  await call('Runtime.enable',{},sessionId);await call('Page.enable',{},sessionId);await call('Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:false,flatten:true},sessionId);await call('Page.addScriptToEvaluateOnNewDocument',{source:slowStartupShim},sessionId);await call('Page.navigate',{url:pathToFileURL(path.join(root,edition)).href},sessionId);
+  const startingView=await waitFor(async()=>{for(const [viewSession,list]of contexts){let ancestor=viewSession;while(parents.has(ancestor))ancestor=parents.get(ancestor);if(ancestor!==sessionId)continue;for(const context of list){if(!context.auxData?.isDefault)continue;try{if(await evaluate(viewSession,context.id,"typeof MediaDatabase!=='undefined'&&Boolean(document.getElementById('open-workspace-button'))"))return{session:viewSession,id:context.id};}catch(error){if(!/context|navigat/i.test(error.message))throw error;}}}},edition+' controls during startup');
+  for(const id of ['open-workspace-button','new-workspace','save-workspace','export-report','scan-button','startup-open','startup-new'])assert(await evaluate(startingView.session,startingView.id,`document.getElementById('${id}').disabled`),edition+': '+id+' must wait for initialization');
   const appView=await waitFor(async()=>{if(errors.length)throw Error(errors.join('\n'));for(const [viewSession,list]of contexts){let ancestor=viewSession;while(parents.has(ancestor))ancestor=parents.get(ancestor);if(ancestor!==sessionId)continue;for(const context of list){if(!context.auxData?.isDefault)continue;try{if(await evaluate(viewSession,context.id,"Boolean(document.getElementById('workspace-dialog')?.open)"))return{session:viewSession,id:context.id};}catch(error){if(!/context|navigat/i.test(error.message))throw error;}}}},edition+' startup');
   const appSession=appView.session,appContext=appView.id,rootContext=(contexts.get(sessionId)||[]).find(context=>context.auxData?.isDefault)?.id;
   currentView={session:appSession,id:appContext};
   await evaluate(sessionId,rootContext,filePickerShim);console.log(edition+': SQLite startup reached the database chooser');
   async function completeAction(label,action,finished){await evaluate(appSession,appContext,action);await waitFor(async()=>{if(errors.length)throw Error(errors.join('\n'));if(edition.endsWith('Reviewer.html'))await evaluate(sessionId,rootContext,"(()=>{const panel=document.getElementById('forge-gesture-panel');if(panel&&!panel.hidden)document.getElementById('forge-gesture-continue').click();})()");const status=await evaluate(appSession,appContext,"document.getElementById('startup-status').textContent+' '+document.getElementById('scan-error').textContent");if(/failed|unavailable|Scan stopped/i.test(status))throw Error(label+': '+status);return evaluate(appSession,appContext,finished);},label);}
-  await completeAction('create database',"document.getElementById('startup-new').click()","!document.getElementById('workspace-dialog').open&&document.getElementById('toast').textContent.includes('Database created')");
+  await completeAction('create database',"document.getElementById('startup-new').click();document.getElementById('startup-new').click()","!document.getElementById('workspace-dialog').open&&document.getElementById('toast').textContent.includes('Database created')");
   assert((await evaluate(sessionId,rootContext,'window.__testFileSize()'))>4096,'A real SQLite file was saved');
   await evaluate(appSession,appContext,"document.getElementById('maintenance-button').click()");
   await waitFor(()=>evaluate(appSession,appContext,"document.getElementById('maintenance-dialog').open"),'Maintenance opens');
@@ -54,12 +57,21 @@ const scanFolderShim=`(async()=>{
    await completeAction('save review decision',"document.getElementById('save-workspace').click()","document.getElementById('toast').textContent.includes('Database saved.')");
    console.log(edition+': scan, exclusions, duplicate grouping, saved previews and bucket review passed');
   }
-  await completeAction('reopen database',"document.getElementById('open-workspace-button').click()","!document.getElementById('database-opening-dialog').open&&document.getElementById('toast').textContent.includes('Database opened')");
+  await completeAction('reopen database',"document.getElementById('open-workspace-button').click();document.getElementById('open-workspace-button').click()","!document.getElementById('database-opening-dialog').open&&document.getElementById('toast').textContent.includes('Database opened')");
   if(process.argv.includes('--scan')){
    await evaluate(appSession,appContext,"document.querySelector('[data-bucket=COMPLIANT]').click()");
    await waitFor(()=>evaluate(appSession,appContext,"document.querySelectorAll('#results .card').length===1&&document.querySelector('#results .thumb img')?.naturalWidth>0"),'saved review and preview survive reopening');
   }
   const log=await evaluate(appSession,appContext,"document.getElementById('log-button').click();document.getElementById('log-content').textContent");assert(!/· ERROR ·|Open failed|Create failed|SQLite initialization failed/.test(log),log);
+  await evaluate(appSession,appContext,"document.getElementById('log-dialog').close()");
+  await evaluate(sessionId,rootContext,"window.__testWorkers[0].onerror({message:'Simulated idle worker failure'})");
+  await completeAction('worker failure is explained',"document.getElementById('save-workspace').click()","document.getElementById('toast').textContent.includes('Database worker stopped: Simulated idle worker failure')");
+  const failureLog=await evaluate(appSession,appContext,"document.getElementById('log-button').click();document.getElementById('log-content').textContent");
+  assert(failureLog.includes('Simulated idle worker failure')&&!failureLog.includes('Cannot read properties of undefined'),failureLog);
+  await evaluate(appSession,appContext,"document.getElementById('log-dialog').close()");
+  await completeAction('reopen after worker failure',"document.getElementById('open-workspace-button').click()","!document.getElementById('database-opening-dialog').open&&document.getElementById('toast').textContent.includes('Database opened')");
+  await completeAction('save after worker failure',"document.getElementById('save-workspace').click()","document.getElementById('toast').textContent.includes('Database saved.')");
+  console.log(edition+': delayed startup and explicit reopen after an idle worker failure passed');
   results.push(edition+': real SQLite startup, creation/save/reopen and Maintenance passed; no startup errors.');
   await call('Target.closeTarget',{targetId});
  }

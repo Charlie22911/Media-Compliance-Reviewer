@@ -10,6 +10,7 @@ function progress(phase,done=0,total=0,force=false){const now=Date.now();if(!for
 const sessionId=crypto.randomUUID(),sessionLock='photo-audit-database-session:'+sessionId;
 let releaseSession;
 const databases=new Map(),snapshots=new Map(),cursors=new Map();
+function getDatabase(id){const db=databases.get(id);if(!db)throw new Error('Database changed. Reopen the database before continuing.');return db;}
 const request=r=>new Promise((resolve,reject)=>{r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
 const complete=tx=>new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onabort=tx.onerror=()=>reject(tx.error||new Error('Browser storage transaction failed.'));});
 async function boot(){
@@ -158,15 +159,15 @@ const actions={
    await db.run('PRAGMA cache_size=-8192; PRAGMA temp_store=FILE; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');return{id};
   }catch(e){try{if(db)await db.close();else if(!recovering)await removeWorkingFiles(path);}catch(_){}databases.delete(id);throw e;}
  },
- async query({id,sql,params,token}){const db=databases.get(id);if(db.transaction&&db.transaction!==token)throw new Error('Database transaction is busy.');return db.exec(sql,params);},
- async cursorOpen({id,sql,params,token}){const db=databases.get(id);if(db.transaction&&db.transaction!==token)throw new Error('Database transaction is busy.');let statement;for await(const stmt of sqlite.statements(db.pointer,sql,{unscoped:true})){if(statement){await sqlite.finalize(stmt);await sqlite.finalize(statement);throw new Error('Only one streaming query is allowed.');}statement=stmt;}if(!statement)throw new Error('Empty streaming query.');try{sqlite.bind_collection(statement,params||[]);}catch(error){await sqlite.finalize(statement);throw error;}const cursor=crypto.randomUUID();cursors.set(cursor,{id,statement});return cursor;},
+ async query({id,sql,params,token}){const db=getDatabase(id);if(db.transaction&&db.transaction!==token)throw new Error('Database transaction is busy.');return db.exec(sql,params);},
+ async cursorOpen({id,sql,params,token}){const db=getDatabase(id);if(db.transaction&&db.transaction!==token)throw new Error('Database transaction is busy.');let statement;for await(const stmt of sqlite.statements(db.pointer,sql,{unscoped:true})){if(statement){await sqlite.finalize(stmt);await sqlite.finalize(statement);throw new Error('Only one streaming query is allowed.');}statement=stmt;}if(!statement)throw new Error('Empty streaming query.');try{sqlite.bind_collection(statement,params||[]);}catch(error){await sqlite.finalize(statement);throw error;}const cursor=crypto.randomUUID();cursors.set(cursor,{id,statement});return cursor;},
  async cursorStep({cursor}){const value=cursors.get(cursor);if(!value)return null;if(await sqlite.step(value.statement)===SQLite.SQLITE_ROW)return sqlite.row(value.statement);await actions.cursorFree({cursor});return null;},
  async cursorFree({cursor}){const value=cursors.get(cursor);if(value){cursors.delete(cursor);await sqlite.finalize(value.statement);}},
- async begin({id,token}){const db=databases.get(id);if(db.transaction)throw new Error('Database transaction is busy.');try{await db.run('BEGIN IMMEDIATE');}catch(error){error.retrySafe=true;throw error;}db.transaction=token;},
- async commit({id,token}){const db=databases.get(id);if(db.transaction!==token)throw new Error('Database transaction changed.');try{await db.run('COMMIT');}catch(error){error.retrySafe=error.code===SQLite.SQLITE_BUSY||error.code===SQLite.SQLITE_LOCKED;throw error;}db.transaction=null;},
- async rollback({id,token}){const db=databases.get(id);if(db.transaction!==token)throw new Error('Database transaction changed.');try{await db.run('ROLLBACK');}finally{db.transaction=null;}},
+ async begin({id,token}){const db=getDatabase(id);if(db.transaction)throw new Error('Database transaction is busy.');try{await db.run('BEGIN IMMEDIATE');}catch(error){error.retrySafe=true;throw error;}db.transaction=token;},
+ async commit({id,token}){const db=getDatabase(id);if(db.transaction!==token)throw new Error('Database transaction changed.');try{await db.run('COMMIT');}catch(error){error.retrySafe=error.code===SQLite.SQLITE_BUSY||error.code===SQLite.SQLITE_LOCKED;throw error;}db.transaction=null;},
+ async rollback({id,token}){const db=getDatabase(id);if(db.transaction!==token)throw new Error('Database transaction changed.');try{await db.run('ROLLBACK');}finally{db.transaction=null;}},
  async batch({id,commands,token}){
-  if(commands.length>32)throw new Error('Database batch exceeds its limit.');const db=databases.get(id);
+  if(commands.length>32)throw new Error('Database batch exceeds its limit.');const db=getDatabase(id);
   if(db.transaction){
    if(db.transaction!==token)throw new Error('Database transaction is busy.');
    try{await db.run('SAVEPOINT media_rpc_batch');}catch(error){error.retrySafe=true;throw error;}
@@ -176,12 +177,12 @@ const actions={
   }
   return db.batch(commands);
  },
- async upgrade({id,schema}){const db=databases.get(id);await db.run(schema);return await ImageReviewerCore.upgradeDatabase(db);},
- async snapshot({id}){return databases.get(id).snapshot(activeRequestId);},
+ async upgrade({id,schema}){const db=getDatabase(id);await db.run(schema);return await ImageReviewerCore.upgradeDatabase(db);},
+ async snapshot({id}){return getDatabase(id).snapshot(activeRequestId);},
  async read({token,start,end}){const value=snapshots.get(token);if(!value)throw new Error('Database snapshot expired.');return readFile(value.path,start,Math.min(end,value.size));},
  async release({token}){const value=snapshots.get(token);if(value&&!value.retained){snapshots.delete(token);await removeFile(value.path);}},
  async recoveryPut({id}){
-  await boot();const db=databases.get(id);if(!db)throw new Error('Database changed.');if(db.transaction)throw new Error('Finish the active transaction before saving its recovery pointer.');
+  await boot();const db=getDatabase(id);if(!db)throw new Error('Database changed.');if(db.transaction)throw new Error('Finish the active transaction before saving its recovery pointer.');
   await navigator.locks.request('photo-audit-database-storage-maintenance',async()=>{
    const prior=await recoveryPointer(),tx=storage.transaction('metadata','readwrite',{durability:'strict'}),done=complete(tx);
    tx.objectStore('metadata').put({name:'/recovery-pointer',workingPath:db.path,updatedAt:Date.now()});await done;

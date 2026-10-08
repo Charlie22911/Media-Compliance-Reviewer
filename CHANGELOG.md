@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.3.4 — October 8, 2026
+
+- Keep database controls disabled with visible startup progress until local storage and database initialization finish.
+- Prevent overlapping database-opening actions, validate a replacement before closing the active database, and reject calls using closed handles.
+- Preserve the original database-worker failure in Log and stop reusing its handles in an empty replacement worker. Reopening a database explicitly starts a new worker.
+- Report expired database handles clearly instead of `Cannot read properties of undefined (reading 'transaction')`.
+- Add delayed-startup, failed-replacement, and worker-failure/reopen regression checks for both editions.
+
 ## 3.3.3 — October 8, 2026
 
 - Read saved scan settings and folder progress from the correct database column, preventing scans from stopping with `no such column: value`.

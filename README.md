@@ -14,6 +14,8 @@ The main download includes its Forge wrapper, file-access prompts, database runt
 
 ## Start a review
 
+Wait for **Starting database** in Activity to finish. Database controls stay disabled until storage is ready, then the database chooser opens automatically.
+
 1. Choose **Create database** for a new review or **Open existing database** to continue one. Select a writable `.sqlite` or `.db` file. After opening a file, wait for the separate **Checking database** window to close.
 2. Choose **Select folder and scan**. Check the scan mode, file types, and exclusions, then choose **Choose folder and start scan**. You can select a local folder, mapped drive, or accessible network share. For a UNC path, paste the path into the Windows folder picker's address bar.
 3. Use **Review media while scan continues** to review early, or continue after scanning finishes. To continue an interrupted scan, choose **Resume scan** and reconnect the original folder if requested.
@@ -78,6 +80,8 @@ Recoverable folder reads, file reads, fingerprinting, and database operations re
 
 Open **Log** beside About and Help to see recent activity, errors, and why a scan ended. The log includes up to 500 session entries, saved summaries from the last five scans, and up to 20 recent read errors per saved scan. Saved scan details travel with the database; other activity lasts until the tool closes or reloads. **Save log as text** downloads the displayed details. Logs can contain filenames and paths.
 
+If Log reports **Database worker stopped**, it includes the original failure. Reopen your saved SQLite file, or reload the HTML and choose **Recover browser database** to recover locally committed progress. Failed workers are not reused, and unconfirmed writes are not replayed automatically.
+
 Click a thumbnail or checkbox to select it, then choose a selected-item action such as **Compliant**. The bucket tabs switch the results you are viewing. A click on another selection is queued while a review action saves; repeated clicks on the same pending items do not create duplicate actions. Page refills do not hold up the next review write. Evidence capture and report export still coordinate changes while they are running. Failed review writes retain the selection for retry. When items move out of the current bucket, a compact loading box appears while the page fills; the previous page height is released.
 
 **Fit** shows the entire image within the thumbnail frame. **Fill** fills the frame and crops around the center.
@@ -92,9 +96,9 @@ npm run build
 npm run check
 ```
 
-The optional regression checks use Node.js 24 or later: run `npm run test:scan`, `npm run test:schema`, `npm run test:identity`, `npm run test:results`, `npm run test:display`, `npm run test:review`, `npm run test:recovery`, and `npm run test:responsive`.
+The optional regression checks use Node.js 24 or later: run `npm run test:startup`, `npm run test:scan`, `npm run test:schema`, `npm run test:identity`, `npm run test:results`, `npm run test:display`, `npm run test:review`, `npm run test:recovery`, and `npm run test:responsive`.
 
-On Windows with Chrome installed, `npm run test:browser` checks both packaged editions using their actual SQLite and preview workers. It scans a small test folder, groups duplicates, changes a review bucket, and saves and reopens a database. File pickers use test handles, so the check does not read your media or databases. To use another Chromium browser, set `MEDIA_REVIEWER_TEST_BROWSER` to its executable path. Test profiles and results are written under `.build/`. These checks do not measure a large scan's memory use or performance on your computer.
+On Windows with Chrome installed, `npm run test:browser` checks both packaged editions using their actual SQLite and preview workers. It delays startup to check that database controls wait, scans a small test folder, groups duplicates, changes a review bucket, and saves and reopens a database. It also checks reopening after a simulated worker failure. File pickers use test handles, so the check does not read your media or databases. To use another Chromium browser, set `MEDIA_REVIEWER_TEST_BROWSER` to its executable path. Test profiles and results are written under `.build/`. These checks do not measure a large scan's memory use or performance on your computer.
 
 The build uses the vendored runtimes and embedded HTML templates. The app does not download code or decoder assets at runtime. External license links in About open websites only when clicked.
 

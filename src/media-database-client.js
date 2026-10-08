@@ -2,19 +2,23 @@
  'use strict';
  const BATCH_COMMANDS=32,BATCH_BYTES=2*1024*1024;
  const commandBytes=command=>command.sql.length*2+command.params.reduce((size,value)=>size+(typeof value==='string'?value.length*2:value?.byteLength||8),0);
- let worker=null,sequence=0,inFlight=0;const waiting=[],pending=new Map();
+ let worker=null,sequence=0,inFlight=0,workerFailure=null,lastFailureMessage='';const waiting=[],pending=new Map(),openIds=new Set();
+ function reportWorkerFailure(error){if(lastFailureMessage===error.message)return;lastFailureMessage=error.message;if(typeof g.CustomEvent==='function')g.dispatchEvent?.(new g.CustomEvent('media-database-failure',{detail:{message:error.message}}));}
  function sendNext(){while(inFlight<4&&waiting.length){const item=waiting.shift();inFlight++;pending.set(item.requestId,item);worker.postMessage({requestId:item.requestId,method:item.method,args:item.args});}}
  function localCall(method,args){
+  if(args?.id&&!openIds.has(args.id)){if(method==='close')return Promise.resolve();return Promise.reject(workerFailure||new Error('Database changed. Reopen the database before continuing.'));}
+  if(!worker&&method!=='open'&&method!=='recoveryGet'){if(method==='release'||method==='cursorFree')return Promise.resolve();return Promise.reject(workerFailure||new Error('Database changed. Reopen the database before continuing.'));}
   if(waiting.length>=32)return Promise.reject(new Error('Database request queue is full. Retry when the current operation finishes.'));
   if(!worker){const url=URL.createObjectURL(new Blob([document.querySelector('#database-worker-source').textContent],{type:'text/javascript'}));worker=new Worker(url);URL.revokeObjectURL(url);
-   worker.onmessage=e=>{if(e.data.progress){g.dispatchEvent?.(new CustomEvent('media-database-progress',{detail:e.data.progress}));return;}const item=pending.get(e.data.requestId);if(!item)return;pending.delete(e.data.requestId);inFlight--;e.data.error?item.reject(Object.assign(new Error(e.data.error),{name:e.data.errorName||'Error',retrySafe:e.data.retrySafe===true})):item.resolve(e.data.result);sendNext();};
-   worker.onerror=e=>{for(const item of [...pending.values(),...waiting])item.reject(new Error(e.message||'Database worker failed.'));pending.clear();waiting.length=0;inFlight=0;worker.terminate();worker=null;};
+   const currentWorker=worker;
+   worker.onmessage=e=>{if(worker!==currentWorker)return;if(e.data.progress){g.dispatchEvent?.(new CustomEvent('media-database-progress',{detail:e.data.progress}));return;}const item=pending.get(e.data.requestId);if(!item)return;pending.delete(e.data.requestId);inFlight--;if(!e.data.error){if(item.method==='open')openIds.add(e.data.result.id);if(item.method==='close')openIds.delete(item.args.id);}e.data.error?item.reject(Object.assign(new Error(e.data.error),{name:e.data.errorName||'Error',retrySafe:e.data.retrySafe===true})):item.resolve(e.data.result);sendNext();};
+   worker.onerror=e=>{if(worker!==currentWorker)return;e.preventDefault?.();workerFailure=new Error('Database worker stopped: '+(e.message||'unknown worker failure')+'. Reopen the database or recover the browser copy before continuing.');for(const item of [...pending.values(),...waiting])item.reject(workerFailure);pending.clear();waiting.length=0;inFlight=0;openIds.clear();currentWorker.terminate();worker=null;reportWorkerFailure(workerFailure);};
   }
   return new Promise((resolve,reject)=>{waiting.push({requestId:++sequence,method,args,resolve,reject});sendNext();});
  }
  const rpc=async(method,args={})=>{
   try{const value=await(typeof g.__MediaDatabaseRPC==='function'?g.__MediaDatabaseRPC(method,args):localCall(method,args));if(value?.__mediaDatabaseError)throw Object.assign(new Error(value.message),{name:value.name||'Error',retrySafe:value.retrySafe===true});return value;}
-  catch(error){if(/Database request queue is full/.test(error.message))error.retrySafe=true;throw error;}
+  catch(error){if(/Database request queue is full/.test(error.message))error.retrySafe=true;if(/^Database worker stopped:/.test(error.message))reportWorkerFailure(error);throw error;}
  };
  class Snapshot {
   constructor(value){this.token=value.token;this.size=value.size;this.type='application/vnd.sqlite3';}
@@ -25,10 +29,11 @@
  class Database {
   constructor(id){this.id=id;this.pending=[];this.pendingBytes=0;this.flushPromise=null;this.timer=null;this.transaction=null;this.closed=false;this.boundaries=[];this.boundaryRunning=false;this.snapshotChain=Promise.resolve();this.retryDelayMs=250;this.uncertainWrite=null;}
   static async open(input){const result=await rpc('open',{input});return new Database(result.id);}
+  assertOpen(){if(this.closed)throw new Error('Database changed. Reopen the database before continuing.');}
   enqueue(sql,params=[]){if(this.closed)throw new Error('Database changed.');if(this.uncertainWrite)throw this.uncertainWrite;const command={sql:String(sql),params};this.pending.push(command);this.pendingBytes+=commandBytes(command);if(this.pending.length>=BATCH_COMMANDS||this.pendingBytes>=BATCH_BYTES)this.flush().catch(e=>{this.error=e;});else if(!this.transaction&&!this.timer)this.timer=setTimeout(()=>{this.timer=null;this.flush().catch(e=>{this.error=e;});},4);}
   async retry(method,args,safe){
    for(let attempt=0;;attempt++)try{return await rpc(method,args);}catch(error){
-    const permanent=/cancelled|canceled|invalid|unsupported|corrupt|malformed|syntax error|constraint failed|no such table|database changed|quota|disk.*full/i.test(error.message);
+    const permanent=/cancelled|canceled|invalid|unsupported|corrupt|malformed|syntax error|constraint failed|no such table|database changed|database worker stopped|quota|disk.*full/i.test(error.message);
     if(attempt>=3||permanent||!safe(error))throw error;
     if(typeof g.CustomEvent==='function')g.dispatchEvent?.(new g.CustomEvent('media-database-retry',{detail:{method,attempt:attempt+1,message:error.message}}));
     await new Promise(resolve=>setTimeout(resolve,this.retryDelayMs*2**attempt));
@@ -50,9 +55,10 @@
   }
   async idle(){while(this.transaction)await this.transaction.done;await this.flush();}
   async run(sql,params=[],options={}){
+   this.assertOpen();
    sql=String(sql);
    if(/^\s*BEGIN\b/i.test(sql)){
-    await this.boundary(async()=>{await this.idle();let resolve;this.transaction={token:crypto.randomUUID(),done:new Promise(r=>resolve=r),resolve};try{await this.retry('begin',{id:this.id,token:this.transaction.token},error=>error.retrySafe===true);}catch(e){if(!e.retrySafe){try{await rpc('rollback',{id:this.id,token:this.transaction.token});}catch(_){this.uncertainWrite=e;}}this.transaction.resolve();this.transaction=null;throw e;}},options.priority||0);return this;
+    await this.boundary(async()=>{await this.idle();this.assertOpen();let resolve;this.transaction={token:crypto.randomUUID(),done:new Promise(r=>resolve=r),resolve};try{await this.retry('begin',{id:this.id,token:this.transaction.token},error=>error.retrySafe===true);}catch(e){if(!e.retrySafe){try{await rpc('rollback',{id:this.id,token:this.transaction.token});}catch(_){this.uncertainWrite=e;}}this.transaction.resolve();this.transaction=null;throw e;}},options.priority||0);return this;
    }
    if(/^\s*(COMMIT|END|ROLLBACK)\b/i.test(sql)){
     const transaction=this.transaction;if(!transaction)throw new Error('No database transaction is active.');
@@ -62,21 +68,21 @@
    }
    this.enqueue(sql,params);if(!this.transaction||this.flushPromise||this.pending.length>=BATCH_COMMANDS||this.pendingBytes>=BATCH_BYTES)await this.flush();return this;
   }
-  async exec(sql,params=[]){await this.flush();sql=String(sql);return this.retry('query',{id:this.id,sql,params,token:this.transaction?.token},()=>/^\s*SELECT\b/i.test(sql));}
+  async exec(sql,params=[]){this.assertOpen();await this.flush();this.assertOpen();sql=String(sql);return this.retry('query',{id:this.id,sql,params,token:this.transaction?.token},()=>/^\s*SELECT\b/i.test(sql));}
   prepare(sql){let params=[],cursor=null,row=null;const free=async()=>{if(cursor){const value=cursor;cursor=null;await rpc('cursorFree',{cursor:value});}row=null;};return{bind(value){if(cursor)throw new Error('Finish the previous query before rebinding.');params=value;},run:async value=>{await free();await this.run(sql,value||params);},step:async()=>{await this.flush();if(!cursor)cursor=await rpc('cursorOpen',{id:this.id,sql,params,token:this.transaction?.token});row=await rpc('cursorStep',{cursor});return row!==null;},get:()=>row,free};}
-  async upgrade(schema){await this.idle();return rpc('upgrade',{id:this.id,schema});}
-  async retain(){return this.boundary(async()=>{await this.idle();return this.retry('recoveryPut',{id:this.id},()=>true);});}
+  async upgrade(schema){await this.idle();this.assertOpen();return rpc('upgrade',{id:this.id,schema});}
+  async retain(){return this.boundary(async()=>{await this.idle();this.assertOpen();return this.retry('recoveryPut',{id:this.id},()=>true);});}
   async exportBlob(){
    const result=this.snapshotChain.catch(()=>{}).then(async()=>{
     let copying;
     // Order snapshot initialization with BEGIN, then release that boundary.
     // The worker copies incrementally and accepts writes between copy steps.
-    await this.boundary(async()=>{await this.idle();copying=this.retry('snapshot',{id:this.id},error=>error.retrySafe===true);});
+    await this.boundary(async()=>{await this.idle();this.assertOpen();copying=this.retry('snapshot',{id:this.id},error=>error.retrySafe===true);});
     return new Snapshot(await copying);
    });
    this.snapshotChain=result.catch(()=>{});return result;
   }
-  async close(){if(this.closed)return;if(this.transaction)await this.run('ROLLBACK');try{await this.flush();}catch(_){}await rpc('close',{id:this.id});this.closed=true;}
+  async close(){if(this.closed)return;if(this.transaction)await this.run('ROLLBACK');try{await this.flush();}catch(_){}this.closed=true;clearTimeout(this.timer);await rpc('close',{id:this.id});}
  }
  async function recordStore(database,kind,limit=256){
   const cache=new Map();let count=Number((await database.exec('SELECT COUNT(*) FROM catalog_records WHERE kind=?',[kind]))[0]?.values[0][0]||0);

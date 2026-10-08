@@ -21,6 +21,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     workspaceWriteChain = Promise.resolve(),dbSyncSnapshot = null,exportCache = null,
     lastWorkspaceWriteAt = 0,recoveryEnabled = true;
   let localSavedRevision = -1,localSaveError = '',recoveryPromise = null,autoSaveBaseline = Date.now();
+  let databaseReady = false,databaseChanging = false;
   let upgradePending = false,databaseGeneration = 0,lastRecoveryWriteAt = 0,lastDatabaseBytes = 0,reportExportActive = false;
   const fileByOccurrence = new Map();
   const directoryHandleByRoot = new Map();
@@ -105,6 +106,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     toast.timer = setTimeout(async () => await t.classList.add('hidden'), 4200);
   }
   function assertNoEvidenceOperation(purpose) {
+    if (!databaseReady) throw new Error('Database storage is still starting. Wait for the startup status to finish.');
     if (reportExportActive) throw new Error('Wait for report export to finish.');
     if (!activeEvidenceOperation && !evidenceOperationInFlight) return;
     const active = activeEvidenceOperation?.purpose || 'active';
@@ -481,6 +483,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   const yieldPaint = () => new Promise((resolve) => {let done = false;const finish = () => {if (!done) {done = true;resolve();}};setTimeout(finish, 40);requestAnimationFrame(finish);});
   function attachDatabaseClient(database) {
     databaseClient?.dispose();let disposed = false;
+    finishOperation('Database unavailable');
     const current = () => {if (disposed || database !== db) throw new Error('Database changed.');};
     databaseClient = { get transactionOpen() {return Boolean(database.transaction);}, async waitForTransaction() {await database.idle();current();}, async snapshot() {await database.idle();current();return database.exportBlob();}, async query(sql, params = []) {await database.idle();current();const result = await database.exec(sql, params);current();return result;}, dispose() {disposed = true;}, flush() {return database.flush();} };
   }
@@ -628,16 +631,17 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       loaded.maintenanceEvents=[...maintenance.values()];
     } catch (error) {await candidate.close();throw error;}
     if(recoveryPromise)try{await recoveryPromise;}catch(_){}
-    await db?.close();
-    db = candidate;
+    const previous = db;
+    db = candidate;ws = loaded;attachDatabaseClient(db);
+    databaseGeneration++;cancelPreviewJobs();
+    await previous?.close();
     upgradePending = migration.upgraded;
     clearTimeout(autoSaveTimer);
     autoSaveTimer = null;
     autoSaveDueAt = 0;
     workspaceFileHandle = null;
     workspaceWritable = false;
-    ws = loaded;attachDatabaseClient(db);await installCatalog(ws);await initializePreviewBudget();
-    databaseGeneration++;cancelPreviewJobs();
+    await installCatalog(ws);await initializePreviewBudget();
     dirty = false;
     changeRevision = 0;
     dbSyncSnapshot = null;
@@ -3377,14 +3381,18 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   function renderScanActivity() {
     const background = Boolean(scanController) && !$('#scan-dialog').open,
-      banner = $('#live-scan-banner'),busy = Boolean(scanController) || evidenceOperationInFlight || reviewActionInFlight;
+      banner = $('#live-scan-banner'),busy = !databaseReady || databaseChanging || Boolean(scanController) || evidenceOperationInFlight || reviewActionInFlight;
     banner.classList.toggle('hidden', !background);
     $('#scan-button').disabled = busy;
     $('#new-workspace').disabled = busy;
     $('#open-workspace-button').disabled = busy;
     $('#maintenance-button').disabled = busy;
     $('#save-workspace').disabled = busy;
+    $('#export-report').disabled = busy || reportExportActive;
     $('#lock-vault').disabled = busy;
+    $('#startup-open').disabled = busy;
+    $('#startup-new').disabled = busy;
+    $('#startup-recover').disabled = busy;
   }
   function renderResumeScan() {
     const scan = scanController ? null : C.latestIncompleteScan(ws.scans, ws.roots),
@@ -5428,7 +5436,17 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 2000);
   }
+  async function runDatabaseChange(operation) {
+    assertNoEvidenceOperation('change databases');
+    if (databaseChanging) return false;
+    databaseChanging = true;renderScanActivity();
+    try {return await operation();}
+    finally {databaseChanging = false;renderScanActivity();}
+  }
   async function createNewWorkspace(fromStartup = false) {
+    return runDatabaseChange(() => createNewWorkspaceImpl(fromStartup));
+  }
+  async function createNewWorkspaceImpl(fromStartup = false) {
     assertNoEvidenceOperation('create a database');
     if (!fromStartup && dirty && !confirm(
       'Create a new database and discard unsaved changes since the last save?')) return false;
@@ -5456,17 +5474,22 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     assertNoEvidenceOperation('create a database');
     const initialVersion = await workspaceFileVersion(await handle.getFile());
     assertNoEvidenceOperation('create a database');
+    const candidate = await new SQL.Database(),nextWorkspace = C.newWorkspace();
+    try {
+      await initSchema(candidate);
+      await candidate.run('INSERT OR REPLACE INTO app_meta VALUES (?,?)', ['workspace_json', JSON.stringify(C.serializeWorkspace(nextWorkspace))]);
+      await candidate.upgrade(MEDIA_DATABASE_SCHEMA);
+    } catch (error) {await candidate.close();throw error;}
     if(recoveryPromise)try{await recoveryPromise;}catch(_){}
-    await db?.close();
-    db = await new SQL.Database();
-    await initSchema();
+    const previous = db;
+    db = candidate;ws = nextWorkspace;attachDatabaseClient(db);
+    databaseGeneration++;cancelPreviewJobs();
+    await previous?.close();
     clearTimeout(autoSaveTimer);
     autoSaveTimer = null;
     autoSaveDueAt = 0;
-    ws = C.newWorkspace();
-    databaseGeneration++;cancelPreviewJobs();upgradePending = false;
-    await db.run('INSERT OR REPLACE INTO app_meta VALUES (?,?)', ['workspace_json', JSON.stringify(C.serializeWorkspace(ws))]);
-    await db.upgrade(MEDIA_DATABASE_SCHEMA);attachDatabaseClient(db);await installCatalog(ws);await initializePreviewBudget();
+    upgradePending = false;
+    await installCatalog(ws);await initializePreviewBudget();
     dbSyncSnapshot = null;
     exportCache = null;
     lastWorkspaceWriteAt = 0;lastRecoveryWriteAt=0;lastDatabaseBytes=0;autoSaveBaseline=Date.now();
@@ -5505,6 +5528,9 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     return chooserWasOpen;
   }
   async function checkDatabaseFile(input, name) {
+    return runDatabaseChange(() => checkDatabaseFileImpl(input, name));
+  }
+  async function checkDatabaseFileImpl(input, name) {
     const chooserWasOpen = showDatabaseOpening(name);
     try {await yieldPaint();await loadDb(input, false);await restoreSourceHandles(ws.id);}
     catch (error) {if (chooserWasOpen) $('#workspace-dialog').showModal();throw error;}
@@ -5566,6 +5592,9 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     toast('Database opened. Automatic scan checkpoints are active.');
   }
   async function chooseWorkspace() {
+    return runDatabaseChange(chooseWorkspaceImpl);
+  }
+  async function chooseWorkspaceImpl() {
     assertNoEvidenceOperation('open a database');
     if (dirty && !confirm('Open another database and discard unsaved changes since the last save?')) return;
     try {
@@ -6380,6 +6409,16 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     catch (error) {toast('Upgrade copy failed: ' + error.message, true);}
   });
   setupDragSelection();
+  window.addEventListener('media-database-failure', event => {
+    const message = event.detail?.message || 'Database worker stopped. Reopen the database before continuing.';
+    logActivity('error','Database worker stopped',message);
+    showOperation('Database unavailable','Reopen the database or reload and recover the browser copy');
+    localSaveError = message;autoSaveError = message;
+    if (scanController) scanController.cancelled = true;
+  });
+  renderScanActivity();
+  showOperation('Starting database','Preparing browser storage…');
+  $('#startup-status').textContent = 'Starting database storage…';
   try {
     SQL = { Database: function (input) {return MediaDatabase.Database.open(input);} };
     db = await new SQL.Database();
@@ -6392,12 +6431,16 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     }
     catch (error) {logActivity('warning','Saved browser database could not be listed',error.message);}
     await renderAll();
+    databaseReady = true;renderScanActivity();
+    $('#startup-status').textContent = '';
     $('#workspace-dialog').showModal();
   }
   catch (e) {
     await renderWorkspaceState();
     toast('SQLite initialization failed: ' + e.message, true);
     $('#workspace-state').textContent = 'SQLite unavailable: ' + e.message;
+  } finally {
+    finishOperation('Starting database');
   }
 })(
 );
