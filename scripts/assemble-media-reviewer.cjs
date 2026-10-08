@@ -1,6 +1,6 @@
 const fs=require('fs');
 require('./build-media-preview.cjs');
-let html=fs.readFileSync('Media-Compliance-Reviewer-Standalone.html','utf8');
+let html=require('./install-startup-screen.cjs')(fs.readFileSync('Media-Compliance-Reviewer-Standalone.html','utf8'));
 html=html.replace(/<script id="testable-core">[\s\S]*?<\/script>/,()=>'<script id="testable-core">\n'+fs.readFileSync('src/media-reviewer-core.js','utf8')+'\n</script>');
 const sql=html.indexOf('/* sql.js 1.13.0');
 if(sql>=0){const start=html.lastIndexOf('<script>',sql),wasm=html.indexOf('<script id="sqlite-wasm"',sql),end=html.indexOf('</script>',wasm)+9;html=html.slice(0,start)+html.slice(end);}

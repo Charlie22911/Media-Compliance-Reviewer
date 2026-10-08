@@ -1,0 +1,50 @@
+<style id="media-startup-style">
+#media-startup-screen{position:fixed;inset:0;width:min(32rem,calc(100vw - 2rem));max-height:calc(100vh - 2rem);margin:auto;padding:1.75rem;border:1px solid #2b3b55;border-radius:14px;background:#121c2e;color:#eef5ff;box-sizing:border-box;overflow:auto;font:16px/1.5 system-ui,"Segoe UI",sans-serif;color-scheme:dark}
+#media-startup-screen::backdrop{background:#0b1220}
+#media-startup-screen h2{margin:0 0 1rem;font-size:1.25rem;line-height:1.35;overflow-wrap:anywhere}
+#media-startup-screen p{margin:.75rem 0;overflow-wrap:anywhere}
+#media-startup-note{color:#a6b6ce;font-size:.9rem}
+#media-startup-spinner{width:2rem;height:2rem;margin-bottom:1rem;border:3px solid #2b3b55;border-top-color:#69b7ff;border-radius:50%;animation:media-startup-spin 1.2s linear infinite}
+#media-startup-actions{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:1.25rem}
+#media-startup-actions[hidden],#media-startup-spinner[hidden]{display:none}
+#media-startup-screen button{font:inherit;padding:.55rem .85rem;border:1px solid #2b3b55;border-radius:8px;background:#1a2a43;color:#eef5ff;cursor:pointer}
+#media-startup-screen button:focus-visible{outline:2px solid #69b7ff;outline-offset:3px}
+@keyframes media-startup-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){#media-startup-spinner{animation:none}}
+</style>
+<dialog id="media-startup-screen" open aria-labelledby="media-startup-title" aria-describedby="media-startup-phase media-startup-note" aria-busy="true">
+<div id="media-startup-spinner" aria-hidden="true"></div>
+<h2 id="media-startup-title">Starting Media Compliance Reviewer</h2>
+<p id="media-startup-phase" role="status" aria-live="polite">Loading the offline application…</p>
+<p id="media-startup-note">Please wait. Database controls will be available when startup finishes.</p>
+<div id="media-startup-actions" hidden><button id="media-startup-reload" type="button">Reload tool</button><button id="media-startup-close" type="button">Close message</button></div>
+</dialog>
+<script id="media-startup-script">
+(function(){
+ 'use strict';
+ const screen=document.getElementById('media-startup-screen'),phase=document.getElementById('media-startup-phase');
+ const labels={assets:'Loading the offline application…',runtime:'Starting the database engine…',storage:'Opening local browser storage…',cleanup:'Cleaning up temporary database files…',catalog:'Preparing database tables…',recovery:'Checking for saved browser progress…',interface:'Preparing the review interface…'};
+ let state='loading';
+ const notify=body=>{if(parent!==window)parent.postMessage({__mediaStartupScreen:true,...body},'*');};
+ const api=window.MediaStartup={
+  update(name){if(state!=='loading'||!Object.hasOwn(labels,name))return;phase.textContent=labels[name];notify({state:'loading',phase:name});},
+  complete(){state='ready';screen.close();notify({state:'ready'});},
+  fail(message){if(state!=='loading')return;state='failed';screen.setAttribute('aria-busy','false');document.getElementById('media-startup-spinner').hidden=true;document.getElementById('media-startup-title').textContent='Startup could not finish';phase.textContent=String(message||'The application could not initialize.').slice(0,1000);document.getElementById('media-startup-note').textContent='Reload the tool to try again. Database operations remain unavailable until startup succeeds.';document.getElementById('media-startup-actions').hidden=false;notify({state:'failed'});}
+ };
+ screen.removeAttribute('open');screen.showModal();
+ screen.addEventListener('cancel',event=>{if(state==='loading')event.preventDefault();});
+ document.getElementById('media-startup-close').addEventListener('click',()=>screen.close());
+ document.getElementById('media-startup-reload').addEventListener('click',()=>{if(parent===window)location.reload();else notify({state:'reload'});});
+ window.addEventListener('message',event=>{
+  const frame=document.getElementById('forge-secure-app-frame'),message=event.data;
+  if(!frame||event.source!==frame.contentWindow||message?.__mediaStartupScreen!==true)return;
+  if(message.state==='loading')api.update(message.phase);
+  else if(message.state==='ready')api.complete();
+  else if(message.state==='failed'){state='failed';screen.close();}
+  else if(message.state==='reload'&&state==='failed')location.reload();
+ });
+ window.addEventListener('error',event=>api.fail(event.message));
+ window.addEventListener('unhandledrejection',event=>api.fail(event.reason?.message||String(event.reason||'Startup failed.')));
+ api.update('assets');
+})();
+</script>

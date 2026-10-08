@@ -15,10 +15,13 @@ const request=r=>new Promise((resolve,reject)=>{r.onsuccess=()=>resolve(r.result
 const complete=tx=>new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onabort=tx.onerror=()=>reject(tx.error||new Error('Browser storage transaction failed.'));});
 async function boot(){
  if(storage)return;
+ progress('Loading SQLite runtime',0,0,true);
  engine=await SQLiteFactory({wasmBinary:Uint8Array.from(atob(globalThis.MEDIA_SQLITE_WASM),c=>c.charCodeAt(0))});
+ progress('Opening browser storage',0,0,true);
  sqlite=SQLite.Factory(engine);vfs=await IDBBatchAtomicVFS.create('media-idb',engine,{idbName:STORAGE,lockPolicy:'exclusive',lockTimeout:10000});sqlite.vfs_register(vfs,true);
  storage=await request(indexedDB.open(STORAGE));
  await new Promise((resolve,reject)=>{navigator.locks.request(sessionLock,async()=>{resolve();await new Promise(done=>releaseSession=done);}).catch(reject);});
+ progress('Cleaning temporary database files',0,0,true);
  await cleanupAbandonedFiles();
  const open=vfs.jOpen.bind(vfs);
  vfs.jOpen=async(...args)=>{const result=await open(...args);if(result===SQLite.SQLITE_OK){const file=vfs.mapIdToFile.get(args[1]);file.metadata._mediaSession=sessionId;const tx=storage.transaction('metadata','readwrite'),done=complete(tx);tx.objectStore('metadata').put(file.metadata);await done;}return result;};

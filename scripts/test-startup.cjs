@@ -7,6 +7,8 @@ const child=Buffer.from(/const CHILD_HTML_B64 = "([^"]+)"/.exec(shell)[1],'base6
 const selectors=[...app.matchAll(/\$\(['"]#([\w-]+)['"]\)/g)].map(match=>match[1]);
 assert(selectors.length>100,'The check must cover literal application DOM references');
 for(const [edition,html]of [['standalone',source],['Forge child',child]]){
+ assert(html.includes('id="media-startup-screen"'),edition+': the early loading screen must exist');
+ assert(html.indexOf('id="media-startup-script"')<html.indexOf('<script id="testable-core">'),edition+': the loading screen must run before the large embedded assets');
  const markup=html.replace(/<script\b([^>]*)>[\s\S]*?<\/script>/gi,'<script$1></script>').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,'');
  const ids=new Set([...markup.matchAll(/\bid\s*=\s*["']([^"']+)["']/g)].map(match=>match[1]));
  const missing=[...new Set(selectors.filter(id=>!ids.has(id)))];
@@ -20,4 +22,5 @@ for(const [edition,html]of [['standalone',source],['Forge child',child]]){
  const clientIndex=html.indexOf('<script id="database-client">'),appIndex=html.indexOf('const MEDIA_DATABASE_SCHEMA =');
  assert(clientIndex>=0&&clientIndex<appIndex,edition+': database client loads before application startup');
 }
+assert(shell.indexOf('id="media-startup-script"')<shell.indexOf('const CHILD_HTML_B64'), 'Forge loading screen must precede decoding the embedded application');
 console.log('Required startup controls, Evidence size options, Help and database-client order passed in both editions.');

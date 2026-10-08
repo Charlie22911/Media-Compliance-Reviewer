@@ -91,6 +91,10 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   });
   window.addEventListener('media-database-progress', event => {
     const progress=event.detail;
+    if (!databaseReady) {
+      const phases={'Loading SQLite runtime':'runtime','Opening browser storage':'storage','Cleaning temporary database files':'cleanup'};
+      if (Object.hasOwn(phases,progress.phase)) window.MediaStartup?.update(phases[progress.phase]);
+    }
     if(progress.phase === 'Preparing snapshot' && !progress.queued)showOperation('Saving database',progress.phase,progress.done,progress.total);
   });
   window.addEventListener('media-source-cleanup-error', event => {logActivity('warning','A temporary source handle could not be released after retries',event.detail.message);});
@@ -6421,21 +6425,27 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   $('#startup-status').textContent = 'Starting database storage…';
   try {
     SQL = { Database: function (input) {return MediaDatabase.Database.open(input);} };
+    window.MediaStartup?.update('runtime');
     db = await new SQL.Database();
+    window.MediaStartup?.update('catalog');
     await initSchema();
     await db.run('INSERT OR REPLACE INTO app_meta VALUES (?,?)', ['workspace_json', JSON.stringify(C.serializeWorkspace(ws))]);
     await db.upgrade(MEDIA_DATABASE_SCHEMA);attachDatabaseClient(db);await installCatalog(ws);await initializePreviewBudget();
     if (recoveryEnabled) try {
+      window.MediaStartup?.update('recovery');
       recoveryBytes = await idbGet();
       if (recoveryBytes) $('#startup-recover').classList.remove('hidden');
     }
     catch (error) {logActivity('warning','Saved browser database could not be listed',error.message);}
+    window.MediaStartup?.update('interface');
     await renderAll();
     databaseReady = true;renderScanActivity();
     $('#startup-status').textContent = '';
+    window.MediaStartup?.complete();
     $('#workspace-dialog').showModal();
   }
   catch (e) {
+    window.MediaStartup?.fail(e.message || String(e));
     await renderWorkspaceState();
     toast('SQLite initialization failed: ' + e.message, true);
     $('#workspace-state').textContent = 'SQLite unavailable: ' + e.message;

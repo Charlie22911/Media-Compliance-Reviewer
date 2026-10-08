@@ -14,7 +14,7 @@ The main download includes its Forge wrapper, file-access prompts, database runt
 
 ## Start a review
 
-Wait for **Starting database** in Activity to finish. Database controls stay disabled until storage is ready, then the database chooser opens automatically.
+When you open the HTML, a **Starting Media Compliance Reviewer** screen shows the current startup step. The offline application must load its built-in components, open browser storage, and check for saved progress before the database chooser appears. This can take longer on a slower computer or after an interrupted session. Wait for the chooser; database controls stay unavailable until startup finishes. If startup fails, the screen shows the reason and a **Reload tool** button.
 
 1. Choose **Create database** for a new review or **Open existing database** to continue one. Select a writable `.sqlite` or `.db` file. After opening a file, wait for the separate **Checking database** window to close.
 2. Choose **Select folder and scan**. Check the scan mode, file types, and exclusions, then choose **Choose folder and start scan**. You can select a local folder, mapped drive, or accessible network share. For a UNC path, paste the path into the Windows folder picker's address bar.
@@ -98,11 +98,11 @@ npm run check
 
 The optional regression checks use Node.js 24 or later: run `npm run test:startup`, `npm run test:scan`, `npm run test:schema`, `npm run test:identity`, `npm run test:results`, `npm run test:display`, `npm run test:review`, `npm run test:recovery`, and `npm run test:responsive`.
 
-On Windows with Chrome installed, `npm run test:browser` checks both packaged editions using their actual SQLite and preview workers. It delays startup to check that database controls wait, scans a small test folder, groups duplicates, changes a review bucket, and saves and reopens a database. It also checks reopening after a simulated worker failure. File pickers use test handles, so the check does not read your media or databases. To use another Chromium browser, set `MEDIA_REVIEWER_TEST_BROWSER` to its executable path. Test profiles and results are written under `.build/`. These checks do not measure a large scan's memory use or performance on your computer.
+On Windows with Chrome installed, `npm run test:browser` checks both packaged editions using their actual SQLite and preview workers. It delays startup to check the loading screen and disabled database controls, scans a small test folder, groups duplicates, changes a review bucket, and saves and reopens a database. It also checks reopening after a simulated worker failure and reloading after a startup failure. File pickers use test handles, so the check does not read your media or databases. To use another Chromium browser, set `MEDIA_REVIEWER_TEST_BROWSER` to its executable path. Test profiles and results are written under `.build/`. These checks do not measure a large scan's memory use or performance on your computer.
 
 The build uses the vendored runtimes and embedded HTML templates. The app does not download code or decoder assets at runtime. External license links in About open websites only when clicked.
 
-- `src/` contains the reviewer, database client and worker, trusted wrapper database host, preview worker, and first-party Forge database transport.
+- `src/` contains the reviewer, shared early startup screen, database client and worker, trusted wrapper database host, preview worker, and first-party Forge database transport.
 - `scripts/` assembles the standalone reviewer and refreshes the packaged app.
 - `vendor/` contains the SQLite and video-decoder runtimes and their license notices.
 

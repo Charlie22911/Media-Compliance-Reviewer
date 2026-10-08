@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.3.5 — October 8, 2026
+
+- Show a blocking startup screen before loading the large embedded assets in both HTML editions, with the current loading, storage, or recovery step.
+- Keep the startup screen visible until the database chooser is ready. Show the error and a Reload tool button if initialization fails.
+- Update Help with startup guidance.
+
 ## 3.3.4 — October 8, 2026
 
 - Keep database controls disabled with visible startup progress until local storage and database initialization finish.
