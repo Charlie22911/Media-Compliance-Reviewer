@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.1 — Unreleased
+## 3.3.1 — October 7, 2026
 
 - Visit immediate user folders alphabetically, finish each user's subtree before moving on, and save its folder position and discovered paths for resume.
 - Keep successfully read Forge folder entries when a later entry in the same page fails; preserve exhausted folder errors across resumes.
