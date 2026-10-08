@@ -40,10 +40,16 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     WORKSPACE_WRITE_CHUNK_BYTES = 1024 * 1024;
   const pathMeasureCanvas = document.createElement('canvas'),pathMeasureContext =
     pathMeasureCanvas.getContext('2d');
-  const pathResizeObserver = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => {
-    entries.forEach((entry) => fitPathElement(entry.target));
-  }
-  ) : null;
+  const pathResizeObserver = typeof ResizeObserver === 'function' ? (() => {
+    const pending = new Set();let frame = 0;
+    return new ResizeObserver((entries) => {
+      for (const entry of entries) pending.add(entry.target);
+      if (!frame) frame = requestAnimationFrame(() => {
+        frame = 0;const targets = [...pending];pending.clear();
+        for (const target of targets) if (target.isConnected) fitPathElement(target);
+      });
+    });
+  })() : null;
   function decode64(s) {
     const b = atob(s.replace(/\s/g, '')),out = new Uint8Array(b.length);
     for (let i = 0;
@@ -2776,8 +2782,9 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     const full = element.dataset.fullPath || '',width = element.clientWidth;
     if (!full || !width) return;
     pathMeasureContext.font = getComputedStyle(element).font;
-    element.textContent = C.fitPathSuffix(full, width, (value) =>
+    const fitted = C.fitPathSuffix(full, width, (value) =>
     pathMeasureContext.measureText(value).width);
+    if (element.textContent !== fitted) element.textContent = fitted;
   }
   function observeFittedPath(element, fullPath) {
     element.dataset.fullPath = fullPath;
@@ -3685,14 +3692,14 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       catch (error) {logActivity('warning','A temporary source handle could not be released after retries',String(error.message || error));}
     };
     if (!(await journal.count())) await journal.add('', 'directory');
-    const savedMeta = (await db.exec('SELECT value FROM scan_job_meta WHERE scan_id=?', [scan.id]))[0]?.values[0][0];
+    const savedMeta = (await db.exec('SELECT config_json FROM scan_job_meta WHERE scan_id=?', [scan.id]))[0]?.values[0][0];
     const savedCursor = savedMeta ? JSON.parse(savedMeta) : null;
     // Existing journals retain all unfinished work. Only a journal which was
     // already traversed alphabetically can assume earlier paths are finished.
     let fromFolder = savedCursor?.directoryOrder === 'user-folder-asc-v1' ? savedCursor.lastUserFolder ?? '' : null;
     const saveCursor = async path => {
       fromFolder = path.split('/')[0];scan.lastScannedFolder = path;scan.lastScannedUserFolder = fromFolder;scan.directoryOrder = 'user-folder-asc-v1';
-      await db.run('INSERT OR REPLACE INTO scan_job_meta VALUES (?,?)', [scan.id, JSON.stringify({ config:scan.config,directoryOrder:'user-folder-asc-v1',lastUserFolder:fromFolder,lastFolder:path })]);
+      await db.run('INSERT OR REPLACE INTO scan_job_meta(scan_id,config_json) VALUES (?,?)', [scan.id, JSON.stringify({ config:scan.config,directoryOrder:'user-folder-asc-v1',lastUserFolder:fromFolder,lastFolder:path })]);
     };
     const resolveDirectory = async (path) => {
       let handle = rootHandle;

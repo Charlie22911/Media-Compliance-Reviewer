@@ -2343,7 +2343,7 @@ destination according to your evidence-handling requirements. Stored Evidence re
 files in folders you select.</p>
 <dl class="about-details">
 <dt>Version</dt>
-<dd>3.3.2</dd>
+<dd>3.3.3</dd>
 <dt>Authored by</dt>
 <dd>IT1 McPherson, Charlie</dd>
 <dt>Release date</dt>
@@ -2356,7 +2356,8 @@ user. Processing stays on the local computer unless the selected folder or datab
 <button id="decoder-license-button" class="small">Decoder license</button>
 <button id="database-license-button" class="small">Database license</button>
 <h3>Change log</h3>
-<details class="change-entry" open><summary>Version 3.3.2 · October 8, 2026</summary><ul><li>Restore the Evidence database size selector in Maintenance so application startup completes and databases can be opened or created.</li><li>Check required startup controls in both HTML editions during package validation.</li></ul></details>
+<details class="change-entry" open><summary>Version 3.3.3 · October 8, 2026</summary><ul><li>Read saved scan settings and folder progress from the correct database column, preventing scans from stopping with no such column: value.</li><li>Defer path fitting until after resize notifications and avoid rewriting unchanged labels, preventing resize-loop errors during scanning.</li><li>Keep review history linked to migrated fingerprints and repair older dangling links while preserving protected Evidence identities.</li><li>Expand database, application control, and browser workflow checks for both editions.</li></ul></details>
+<details class="change-entry"><summary>Version 3.3.2 · October 8, 2026</summary><ul><li>Restore the Evidence database size selector in Maintenance so application startup completes and databases can be opened or created.</li><li>Check required startup controls in both HTML editions during package validation.</li></ul></details>
 <details class="change-entry"><summary>Version 3.3.1 · October 7, 2026</summary><ul><li>Visit immediate user folders alphabetically, finish each user's subtree before moving on, and save its folder position and discovered paths for resume.</li><li>Keep successfully read Forge folder entries when a later entry in the same page fails; preserve exhausted folder errors across resumes.</li><li>Place retry, save, and review progress in a fixed Activity panel below Database.</li><li>Prepare database copies incrementally so scan and review writes can run between copy steps.</li><li>Queue review clicks on new selections, commit their audit entries with decisions, and release review actions before page refills finish.</li><li>Coalesce database status updates instead of recounting the catalog for each scanned file.</li><li>Coordinate preview decoding separately from parallel file hashing, check image headers before decoding, and retain placeholders after resource-limit failures.</li><li>Load card summaries and page duplicate locations in groups of 100; use the same matching location for display and inspection.</li><li>Report snapshot-copy progress through the Forge bridge and avoid retrying snapshots whose outcome is unknown.</li><li>Save changed portable database files every five minutes, with manual saves and a final save when scanning ends.</li><li>Recover the committed browser working database directly in both editions, including its rollback journal, without preparing a separate recovery snapshot.</li><li>Buffer SQL writes within each item transaction in batches of up to 32 commands, targeting at most 2 MiB per batch; give queued review transactions priority.</li><li>Distinguish local saving from portable file saving, and keep audit history in SQL rows instead of rewriting it in progress metadata.</li><li>Stream matching report records to the chosen file; finish scanning before exporting. Download-only browsers receive numbered report parts.</li></ul></details>
 <details class="change-entry"><summary>Version 3.3.0 · October 6, 2026</summary><ul><li>Add configurable parallel file workers under Scan speed: default 4, adjustable from 1 to 8.</li><li>Prepare file reads, fingerprints, and common-image thumbnails concurrently, then publish results in discovery order.</li><li>Bound pending file preparation to the selected worker count; keep database publication and heavier preview decoders coordinated.</li><li>Preserve cancellation, retries, saved worker settings, and resume checkpoints with parallel preparation.</li></ul></details>
 <details class="change-entry"><summary>Version 3.2.6 · October 6, 2026</summary><ul><li>Keep folder traversal within the Forge iterator limit, including deep folder trees.</li><li>Release temporary source handles while preserving shared connections.</li><li>Retry recoverable folder reads, media reads, fingerprints, and database operations up to three times after the initial attempt.</li><li>Roll back failed database batches before replaying them, preserving completed records and pending writes.</li><li>Serialize database snapshots with scan transactions so automatic saves do not fail from transaction contention.</li></ul></details>
@@ -4126,7 +4127,7 @@ Library.
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.2', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.3', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -4154,7 +4155,7 @@ Library.
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.3.2', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.3.3', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -4316,6 +4317,7 @@ Library.
     if (Number(input.databaseSchemaVersion || 1) > DATABASE_SCHEMA_VERSION) throw new Error('Future database schema is unsupported.');
     validateWorkspace({ ...input, preferences: { ...input.preferences }, roots: {}, occurrences: {} });
     let identityMigration = { changed: 0, conflicts: 0, protectedCount: 0 };
+    let auditRepaired = 0;
     await database.run('BEGIN');
     try {
       if (version < 2) {
@@ -4357,6 +4359,15 @@ Library.
       }
       input.scanCheckpoints = {};
       identityMigration = await migrateQuickGroups(database, input);
+      // SQL audit rows are authoritative even when metadata omits event history.
+      // Keep protected/conflicting old decisions linked to their original keys.
+      if ((await database.exec('SELECT 1 FROM identity_aliases LIMIT 1')).length) {
+        await database.run('CREATE INDEX IF NOT EXISTS review_events_decision_key ON review_events(decision_key)');
+        await database.run('UPDATE review_events SET decision_key=(SELECT group_key FROM identity_aliases WHERE old_key=review_events.decision_key) ' +
+        "WHERE decision_key IN (SELECT a.old_key FROM identity_aliases a WHERE EXISTS (SELECT 1 FROM catalog_records d WHERE d.kind='decisions' AND d.id=a.group_key) " +
+        "AND NOT EXISTS (SELECT 1 FROM catalog_records d WHERE d.kind='decisions' AND d.id=a.old_key))");
+        auditRepaired = Number((await database.exec('SELECT changes()'))[0]?.values[0][0] || 0);
+      }
       if (version < 4) {
         // Compatibility readers can use these views without storing catalog rows twice.
         for (const name of ['contents', 'occurrences', 'decisions']) {
@@ -4375,7 +4386,7 @@ Library.
     if (version < 4) await database.run('VACUUM');
     const check = (await database.exec('PRAGMA integrity_check'))[0]?.values[0][0];
     if (check !== 'ok') throw new Error('Database integrity check failed: ' + check);
-    return { identityMigration, upgraded: version < DATABASE_SCHEMA_VERSION || identityMigration.changed > 0, sourceVersion: version || 1, targetVersion: DATABASE_SCHEMA_VERSION };
+    return { identityMigration, auditRepaired, upgraded: version < DATABASE_SCHEMA_VERSION || identityMigration.changed > 0 || auditRepaired > 0, sourceVersion: version || 1, targetVersion: DATABASE_SCHEMA_VERSION };
   }
 
   function previewLimit(message) {return Object.assign(new Error(message), {code:'RESOURCE_LIMIT'});}
@@ -5144,6 +5155,12 @@ self.onmessage=async e=>{
 }
 ;
 </script>
+
+
+
+
+
+
 
 
 
@@ -6279,7 +6296,7 @@ globalThis.MEDIA_SQLITE_WASM="AGFzbQEAAAABiwREYAJ/fwF/YAF/AX9gA39/fwBgA39/fwF/YA
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.2', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.3', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -6307,7 +6324,7 @@ globalThis.MEDIA_SQLITE_WASM="AGFzbQEAAAABiwREYAJ/fwF/YAF/AX9gA39/fwBgA39/fwF/YA
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.3.2', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.3.3', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -6469,6 +6486,7 @@ globalThis.MEDIA_SQLITE_WASM="AGFzbQEAAAABiwREYAJ/fwF/YAF/AX9gA39/fwBgA39/fwF/YA
     if (Number(input.databaseSchemaVersion || 1) > DATABASE_SCHEMA_VERSION) throw new Error('Future database schema is unsupported.');
     validateWorkspace({ ...input, preferences: { ...input.preferences }, roots: {}, occurrences: {} });
     let identityMigration = { changed: 0, conflicts: 0, protectedCount: 0 };
+    let auditRepaired = 0;
     await database.run('BEGIN');
     try {
       if (version < 2) {
@@ -6510,6 +6528,15 @@ globalThis.MEDIA_SQLITE_WASM="AGFzbQEAAAABiwREYAJ/fwF/YAF/AX9gA39/fwBgA39/fwF/YA
       }
       input.scanCheckpoints = {};
       identityMigration = await migrateQuickGroups(database, input);
+      // SQL audit rows are authoritative even when metadata omits event history.
+      // Keep protected/conflicting old decisions linked to their original keys.
+      if ((await database.exec('SELECT 1 FROM identity_aliases LIMIT 1')).length) {
+        await database.run('CREATE INDEX IF NOT EXISTS review_events_decision_key ON review_events(decision_key)');
+        await database.run('UPDATE review_events SET decision_key=(SELECT group_key FROM identity_aliases WHERE old_key=review_events.decision_key) ' +
+        "WHERE decision_key IN (SELECT a.old_key FROM identity_aliases a WHERE EXISTS (SELECT 1 FROM catalog_records d WHERE d.kind='decisions' AND d.id=a.group_key) " +
+        "AND NOT EXISTS (SELECT 1 FROM catalog_records d WHERE d.kind='decisions' AND d.id=a.old_key))");
+        auditRepaired = Number((await database.exec('SELECT changes()'))[0]?.values[0][0] || 0);
+      }
       if (version < 4) {
         // Compatibility readers can use these views without storing catalog rows twice.
         for (const name of ['contents', 'occurrences', 'decisions']) {
@@ -6528,7 +6555,7 @@ globalThis.MEDIA_SQLITE_WASM="AGFzbQEAAAABiwREYAJ/fwF/YAF/AX9gA39/fwBgA39/fwF/YA
     if (version < 4) await database.run('VACUUM');
     const check = (await database.exec('PRAGMA integrity_check'))[0]?.values[0][0];
     if (check !== 'ok') throw new Error('Database integrity check failed: ' + check);
-    return { identityMigration, upgraded: version < DATABASE_SCHEMA_VERSION || identityMigration.changed > 0, sourceVersion: version || 1, targetVersion: DATABASE_SCHEMA_VERSION };
+    return { identityMigration, auditRepaired, upgraded: version < DATABASE_SCHEMA_VERSION || identityMigration.changed > 0 || auditRepaired > 0, sourceVersion: version || 1, targetVersion: DATABASE_SCHEMA_VERSION };
   }
 
   function previewLimit(message) {return Object.assign(new Error(message), {code:'RESOURCE_LIMIT'});}
@@ -6777,10 +6804,16 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     WORKSPACE_WRITE_CHUNK_BYTES = 1024 * 1024;
   const pathMeasureCanvas = document.createElement('canvas'),pathMeasureContext =
     pathMeasureCanvas.getContext('2d');
-  const pathResizeObserver = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => {
-    entries.forEach((entry) => fitPathElement(entry.target));
-  }
-  ) : null;
+  const pathResizeObserver = typeof ResizeObserver === 'function' ? (() => {
+    const pending = new Set();let frame = 0;
+    return new ResizeObserver((entries) => {
+      for (const entry of entries) pending.add(entry.target);
+      if (!frame) frame = requestAnimationFrame(() => {
+        frame = 0;const targets = [...pending];pending.clear();
+        for (const target of targets) if (target.isConnected) fitPathElement(target);
+      });
+    });
+  })() : null;
   function decode64(s) {
     const b = atob(s.replace(/\s/g, '')),out = new Uint8Array(b.length);
     for (let i = 0;
@@ -9513,8 +9546,9 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     const full = element.dataset.fullPath || '',width = element.clientWidth;
     if (!full || !width) return;
     pathMeasureContext.font = getComputedStyle(element).font;
-    element.textContent = C.fitPathSuffix(full, width, (value) =>
+    const fitted = C.fitPathSuffix(full, width, (value) =>
     pathMeasureContext.measureText(value).width);
+    if (element.textContent !== fitted) element.textContent = fitted;
   }
   function observeFittedPath(element, fullPath) {
     element.dataset.fullPath = fullPath;
@@ -10422,14 +10456,14 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       catch (error) {logActivity('warning','A temporary source handle could not be released after retries',String(error.message || error));}
     };
     if (!(await journal.count())) await journal.add('', 'directory');
-    const savedMeta = (await db.exec('SELECT value FROM scan_job_meta WHERE scan_id=?', [scan.id]))[0]?.values[0][0];
+    const savedMeta = (await db.exec('SELECT config_json FROM scan_job_meta WHERE scan_id=?', [scan.id]))[0]?.values[0][0];
     const savedCursor = savedMeta ? JSON.parse(savedMeta) : null;
     // Existing journals retain all unfinished work. Only a journal which was
     // already traversed alphabetically can assume earlier paths are finished.
     let fromFolder = savedCursor?.directoryOrder === 'user-folder-asc-v1' ? savedCursor.lastUserFolder ?? '' : null;
     const saveCursor = async path => {
       fromFolder = path.split('/')[0];scan.lastScannedFolder = path;scan.lastScannedUserFolder = fromFolder;scan.directoryOrder = 'user-folder-asc-v1';
-      await db.run('INSERT OR REPLACE INTO scan_job_meta VALUES (?,?)', [scan.id, JSON.stringify({ config:scan.config,directoryOrder:'user-folder-asc-v1',lastUserFolder:fromFolder,lastFolder:path })]);
+      await db.run('INSERT OR REPLACE INTO scan_job_meta(scan_id,config_json) VALUES (?,?)', [scan.id, JSON.stringify({ config:scan.config,directoryOrder:'user-folder-asc-v1',lastUserFolder:fromFolder,lastFolder:path })]);
     };
     const resolveDirectory = async (path) => {
       let handle = rootHandle;

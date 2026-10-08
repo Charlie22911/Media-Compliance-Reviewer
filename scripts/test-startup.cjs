@@ -4,10 +4,10 @@ const root=path.join(__dirname,'..'),app=fs.readFileSync(path.join(root,'src/med
 const source=fs.readFileSync(path.join(root,'Media-Compliance-Reviewer-Standalone.html'),'utf8');
 const shell=fs.readFileSync(path.join(root,'Media-Compliance-Reviewer.html'),'utf8');
 const child=Buffer.from(/const CHILD_HTML_B64 = "([^"]+)"/.exec(shell)[1],'base64').toString('utf8');
-const selectors=[...app.matchAll(/\$\(['"]#([\w-]+)['"]\)\.addEventListener\(/g)].map(match=>match[1]);
-assert(selectors.length>50,'The check must cover startup event bindings');
+const selectors=[...app.matchAll(/\$\(['"]#([\w-]+)['"]\)/g)].map(match=>match[1]);
+assert(selectors.length>100,'The check must cover literal application DOM references');
 for(const [edition,html]of [['standalone',source],['Forge child',child]]){
- const markup=html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,'').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,'');
+ const markup=html.replace(/<script\b([^>]*)>[\s\S]*?<\/script>/gi,'<script$1></script>').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,'');
  const ids=new Set([...markup.matchAll(/\bid\s*=\s*["']([^"']+)["']/g)].map(match=>match[1]));
  const missing=[...new Set(selectors.filter(id=>!ids.has(id)))];
  assert.deepEqual(missing,[],edition+': required startup controls are missing');

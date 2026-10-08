@@ -92,7 +92,9 @@ npm run build
 npm run check
 ```
 
-The optional regression checks use Node.js 24 or later: run `npm run test:scan`, `npm run test:results`, `npm run test:recovery`, and `npm run test:responsive`. These checks do not measure a large scan's memory use or performance on your computer.
+The optional regression checks use Node.js 24 or later: run `npm run test:scan`, `npm run test:schema`, `npm run test:identity`, `npm run test:results`, `npm run test:display`, `npm run test:review`, `npm run test:recovery`, and `npm run test:responsive`.
+
+On Windows with Chrome installed, `npm run test:browser` checks both packaged editions using their actual SQLite and preview workers. It scans a small test folder, groups duplicates, changes a review bucket, and saves and reopens a database. File pickers use test handles, so the check does not read your media or databases. To use another Chromium browser, set `MEDIA_REVIEWER_TEST_BROWSER` to its executable path. Test profiles and results are written under `.build/`. These checks do not measure a large scan's memory use or performance on your computer.
 
 The build uses the vendored runtimes and embedded HTML templates. The app does not download code or decoder assets at runtime. External license links in About open websites only when clicked.
 

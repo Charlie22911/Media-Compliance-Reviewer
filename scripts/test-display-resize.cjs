@@ -1,0 +1,16 @@
+const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('assert/strict');
+const app=fs.readFileSync(path.join(__dirname,'../src/media-reviewer-app.js'),'utf8'),frames=[],fits=[];
+const context={Set,ResizeObserver:class{constructor(callback){this.callback=callback;}},requestAnimationFrame:callback=>{frames.push(callback);return frames.length;},fitPathElement:element=>fits.push(element)};
+vm.createContext(context);
+const start=app.indexOf('  const pathResizeObserver ='),end=app.indexOf('  function decode64(',start);
+assert(start>=0&&end>start);vm.runInContext(app.slice(start,end)+'\nglobalThis.observer=pathResizeObserver;',context);
+const target={isConnected:true},detached={isConnected:false};
+context.observer.callback([{target},{target}]);context.observer.callback([{target:detached}]);
+assert.equal(fits.length,0,'Resize notifications must not write layout during observer delivery');
+assert.equal(frames.length,1,'Resize work is coalesced into one animation frame');frames.shift()();
+assert.deepEqual(fits,[target],'Each connected path is fitted once; detached cards are skipped');
+const fn=/function fitPathElement\([^)]*\) \{[\s\S]*?\n  \}/.exec(app);assert(fn);
+let writes=0;const element={dataset:{fullPath:'same'},clientWidth:100,get textContent(){return'same';},set textContent(value){writes++;}};
+Object.assign(context,{C:{fitPathSuffix:()=> 'same'},pathMeasureContext:{measureText:()=>({width:10})},getComputedStyle:()=>({font:'12px sans-serif'})});
+vm.runInContext(fn[0],context);context.fitPathElement(element);assert.equal(writes,0,'An unchanged path must not trigger another layout write');
+console.log('Path resizing is deferred, coalesced and skips unchanged text.');

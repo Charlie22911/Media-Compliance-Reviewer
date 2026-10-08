@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.3.3 — October 8, 2026
+
+- Read saved scan settings and folder progress from the correct database column, preventing scans from stopping with `no such column: value`.
+- Defer path fitting until after resize notifications and avoid rewriting unchanged labels, preventing resize-loop errors during scanning.
+- Keep SQL review history linked to migrated fingerprints and repair older dangling links while preserving protected Evidence identities.
+- Validate application SQL and sort/filter queries against the production schema, check application controls in both editions, and add a real-browser scan, review, and save/reopen check.
+
 ## 3.3.2 — October 8, 2026
 
 - Restore the Evidence database size selector in Maintenance so application startup completes and databases can be opened or created.

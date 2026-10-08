@@ -922,7 +922,7 @@
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.2', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.3', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -950,7 +950,7 @@
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.3.2', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.3.3', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -1112,6 +1112,7 @@
     if (Number(input.databaseSchemaVersion || 1) > DATABASE_SCHEMA_VERSION) throw new Error('Future database schema is unsupported.');
     validateWorkspace({ ...input, preferences: { ...input.preferences }, roots: {}, occurrences: {} });
     let identityMigration = { changed: 0, conflicts: 0, protectedCount: 0 };
+    let auditRepaired = 0;
     await database.run('BEGIN');
     try {
       if (version < 2) {
@@ -1153,6 +1154,15 @@
       }
       input.scanCheckpoints = {};
       identityMigration = await migrateQuickGroups(database, input);
+      // SQL audit rows are authoritative even when metadata omits event history.
+      // Keep protected/conflicting old decisions linked to their original keys.
+      if ((await database.exec('SELECT 1 FROM identity_aliases LIMIT 1')).length) {
+        await database.run('CREATE INDEX IF NOT EXISTS review_events_decision_key ON review_events(decision_key)');
+        await database.run('UPDATE review_events SET decision_key=(SELECT group_key FROM identity_aliases WHERE old_key=review_events.decision_key) ' +
+        "WHERE decision_key IN (SELECT a.old_key FROM identity_aliases a WHERE EXISTS (SELECT 1 FROM catalog_records d WHERE d.kind='decisions' AND d.id=a.group_key) " +
+        "AND NOT EXISTS (SELECT 1 FROM catalog_records d WHERE d.kind='decisions' AND d.id=a.old_key))");
+        auditRepaired = Number((await database.exec('SELECT changes()'))[0]?.values[0][0] || 0);
+      }
       if (version < 4) {
         // Compatibility readers can use these views without storing catalog rows twice.
         for (const name of ['contents', 'occurrences', 'decisions']) {
@@ -1171,7 +1181,7 @@
     if (version < 4) await database.run('VACUUM');
     const check = (await database.exec('PRAGMA integrity_check'))[0]?.values[0][0];
     if (check !== 'ok') throw new Error('Database integrity check failed: ' + check);
-    return { identityMigration, upgraded: version < DATABASE_SCHEMA_VERSION || identityMigration.changed > 0, sourceVersion: version || 1, targetVersion: DATABASE_SCHEMA_VERSION };
+    return { identityMigration, auditRepaired, upgraded: version < DATABASE_SCHEMA_VERSION || identityMigration.changed > 0 || auditRepaired > 0, sourceVersion: version || 1, targetVersion: DATABASE_SCHEMA_VERSION };
   }
 
   function previewLimit(message) {return Object.assign(new Error(message), {code:'RESOURCE_LIMIT'});}

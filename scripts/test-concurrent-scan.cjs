@@ -1,6 +1,6 @@
 // Optional focused regression check; requires Node.js 24 or later.
 const fs = require('fs'), path = require('path'), vm = require('vm'), assert = require('assert/strict');
-const { DatabaseSync } = require('node:sqlite');
+const {createDatabase}=require('./test-database.cjs');
 const sourceRoot = path.join(__dirname, '..');
 const context = { crypto: require('crypto').webcrypto, TextEncoder, TextDecoder, Uint8Array, Map, Set, setTimeout, clearTimeout, setInterval, clearInterval, DOMException };
 vm.createContext(context);
@@ -27,19 +27,8 @@ function directory(name, children, stats) {
 const photo = name => ({ name, kind: 'file', async release() {} });
 (async () => {
   await assert.rejects(context.hashFile({ cancelled: true, worker: { postMessage() {throw Error('Terminated worker must not be used');} } }, {}, 'cancelled', () => {}), error => error.name === 'AbortError');
-  const SQL = { Database: class {
-    constructor() { this.native = new DatabaseSync(':memory:'); }
-    run(sql, params = []) { if (params.length) this.native.prepare(sql).run(...params); else this.native.exec(sql); }
-    exec(sql, params = []) {
-      const statement = this.native.prepare(sql), columns = statement.columns().map(column => column.name), rows = statement.all(...params);
-      return rows.length ? [{ columns, values: rows.map(row => columns.map(column => row[column])) }] : [];
-    }
-    close() { this.native.close(); }
-  } };
-  function fresh() {
-    const sqlite = new SQL.Database();
-    sqlite.run("CREATE TABLE scan_jobs(scan_id TEXT,seq INTEGER,root_id TEXT,path TEXT,kind TEXT,state TEXT,occurrence_id TEXT,error TEXT,PRIMARY KEY(scan_id,seq),UNIQUE(scan_id,path,kind)); CREATE TABLE scan_job_meta(scan_id TEXT PRIMARY KEY,value TEXT)");
-    const database = { pending: [], enqueue(sql, params) { this.pending.push({ sql, params }); }, async flush() { for (const item of this.pending.splice(0)) sqlite.run(item.sql, item.params); }, async run(sql, params = []) { await this.flush(); sqlite.run(sql, params); }, async exec(sql, params = []) { await this.flush(); return sqlite.exec(sql, params); } };
+  async function fresh() {
+    const database = await createDatabase(),sqlite={close:()=>database.close(),exec(sql,params=[]){const statement=database.native.prepare(sql),columns=statement.columns().map(column=>column.name),rows=statement.all(...params);return rows.length?[{columns,values:rows.map(row=>columns.map(column=>row[column]))}]:[];}};
     context.db = database; context.ws = { scanCheckpoints: { scan: {} } };
     return { sqlite, database, scan: { id: 'scan', rootId: 'root', config: {}, errors: [] }, stats: { visits: {}, listed: {}, open: 0, maxOpen: 0 } };
   }
@@ -55,7 +44,7 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     assert.equal(errors,1);assert.deepEqual(paths,['a','c']);assert.equal(busy.size,0);
   }
   {
-    const { sqlite, scan, stats } = fresh(), paths = [], ready = [];let active = 0, maximum = 0, started = 0;
+    const { sqlite, scan, stats } = await fresh(), paths = [], ready = [];let active = 0, maximum = 0, started = 0;
     const controller = { cancelled: false, async prepareEntry(entry, slot) {
       const index = started++;active++;maximum = Math.max(maximum, active);
       return { slot, promise: new Promise(resolve => setTimeout(() => {active--;ready.push(index);resolve({ index });}, index === 0 ? 90 : 10)) };
@@ -67,7 +56,7 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     assert.equal(maximum, 4);assert(ready[0] !== 0, 'Preparation can finish out of order');assert.deepEqual(paths, Array.from({length:12},(_,i)=>i+'.jpg'),'Publication stays in discovery order');sqlite.close();
   }
   {
-    const {sqlite,scan,stats}=fresh(),paths=[],controller={cancelled:false,async prepareEntry(entry,slot){return{slot,promise:Promise.resolve({})};}};
+    const {sqlite,scan,stats}= await fresh(),paths=[],controller={cancelled:false,async prepareEntry(entry,slot){return{slot,promise:Promise.resolve({})};}};
     const root=directory('cancel-parallel',Array.from({length:12},(_,i)=>photo(i+'.jpg')),stats);
     await context.runJournalScan(root,scan,{...config,workerCount:4},async entry=>{await consume(entry,paths);if(paths.length===2)controller.cancelled=true;},controller);
     assert.equal(sqlite.exec("SELECT count(*) FROM scan_jobs WHERE kind='file' AND state='processing'")[0].values[0][0],0,'Cancellation returns queued files to pending');
@@ -76,13 +65,13 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     assert.deepEqual(paths,Array.from({length:12},(_,i)=>i+'.jpg'),'Resume appends queued files once, in discovery order');sqlite.close();
   }
   {
-    const { sqlite, scan, stats } = fresh(), paths = [], media = photo('cleanup.jpg');let releases = 0;
+    const { sqlite, scan, stats } = await fresh(), paths = [], media = photo('cleanup.jpg');let releases = 0;
     media.release = async () => {if (++releases <= 3) throw Error('Temporary handle release failure');};
     const result = await context.runJournalScan(directory('cleanup', [media], stats), scan, config, entry => consume(entry, paths), { cancelled: false });
     assert.equal(releases, 4, 'Temporary cleanup failures receive three retries');assert.equal(result.errors.length, 0);assert.deepEqual(paths, ['cleanup.jpg']);sqlite.close();
   }
   {
-    const { sqlite, scan, stats } = fresh(), paths = [], controller = { cancelled: false };
+    const { sqlite, scan, stats } = await fresh(), paths = [], controller = { cancelled: false };
     const child = directory('slow', [photo('b.jpg')], stats), user = directory('person.first', [photo('a.jpg'), child], stats), root = directory('root', [user], stats);
     const open = user.getDirectoryHandle;
     let release, opening = false;
@@ -95,7 +84,7 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     assert.equal(paths.length, 2);assert.equal(stats.open, 0);sqlite.close();
   }
   {
-    const { sqlite, database, scan, stats } = fresh(), paths = [], controller = { cancelled: false };
+    const { sqlite, database, scan, stats } = await fresh(), paths = [], controller = { cancelled: false };
     const root = directory('root', Array.from({ length: 200 }, (_, index) => photo(index + '.jpg')), stats);
     let overlapped = false;
     await context.runJournalScan(root, scan, config, async entry => {
@@ -118,7 +107,7 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     assert.equal(stats.open, 0); sqlite.close();
   }
   {
-    const { sqlite, scan, stats } = fresh(), paths = [], controller = { cancelled: false };
+    const { sqlite, scan, stats } = await fresh(), paths = [], controller = { cancelled: false };
     const root = directory('root', Array.from({ length: 70 }, (_, index) => photo(index + '.jpg')), stats);
     const original = root.entries;
     let release, readWaiting = false;
@@ -137,7 +126,7 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     assert.equal(stats.open, 0); sqlite.close();
   }
   {
-    const { sqlite, database, scan, stats } = fresh(), paths = [], controller = { cancelled: false };
+    const { sqlite, database, scan, stats } = await fresh(), paths = [], controller = { cancelled: false };
     const root = directory('root', Array.from({ length: 70 }, (_, index) => photo(index + '.jpg')), stats);
     let failed = false;
     const result = await context.runJournalScan(root, scan, config, async entry => {
@@ -153,7 +142,7 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     assert.equal(paths.length, 70); assert.equal(new Set(paths).size, 70); sqlite.close();
   }
   {
-    const { sqlite, scan, stats } = fresh(), paths = [], controller = { cancelled: false };
+    const { sqlite, scan, stats } = await fresh(), paths = [], controller = { cancelled: false };
     const root = directory('root', Array.from({ length: 200 }, (_, index) => directory('user' + index, [photo('a.jpg'), photo('skip.txt')], stats)), stats);
     let firstCount;
     await context.runJournalScan(root, scan, config, async entry => { firstCount ??= stats.listed.root; await consume(entry, paths); }, controller);
@@ -164,7 +153,7 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     sqlite.close();
   }
   {
-    const { sqlite, scan, stats } = fresh(), paths = [], controller = { cancelled: false };
+    const { sqlite, scan, stats } = await fresh(), paths = [], controller = { cancelled: false };
     const root = directory('root', Array.from({ length: 100 }, (_, index) => photo(index + '.jpg')), stats);
     await context.runJournalScan(root, scan, config, async entry => { assert(stats.listed.root <= 133); await consume(entry, paths); if (paths.length === 5) controller.cancelled = true; }, controller);
     assert.equal(stats.open, 0, 'Cancellation closes suspended iterators');
@@ -175,7 +164,7 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     assert.equal(stats.open, 0); sqlite.close();
   }
   {
-    const { sqlite, scan, stats } = fresh(), paths = [], controller = { cancelled: false };
+    const { sqlite, scan, stats } = await fresh(), paths = [], controller = { cancelled: false };
     let root = directory('bottom', [photo('a.jpg')], stats);
     for (let depth = 70; depth >= 0; depth--) root = directory('depth' + depth, [root], stats);
     await context.runJournalScan(root, scan, config, entry => consume(entry, paths), controller);
@@ -183,7 +172,7 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     assert.equal(stats.open, 0); sqlite.close();
   }
   {
-    const { sqlite, scan, stats } = fresh(), paths = [], controller = { cancelled: false };
+    const { sqlite, scan, stats } = await fresh(), paths = [], controller = { cancelled: false };
     const failing = directory('broken', [photo('a.jpg'), photo('b.jpg')], stats);
     const original = failing.entries;
     let fail = true;
@@ -197,11 +186,11 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     sqlite.close();
   }
   {
-    const {sqlite,database,scan,stats}=fresh(),paths=[],controller={cancelled:false};
+    const {sqlite,database,scan,stats}= await fresh(),paths=[],controller={cancelled:false};
     const root=directory('root',[directory('charlie.last',[photo('3.jpg')],stats),directory('alpha.first.extra',[photo('extra.jpg')],stats),directory('alpha.first',[photo('1.jpg'),directory('nested',[photo('nested.jpg')],stats)],stats),directory('bravo.middle',[photo('2.jpg')],stats)],stats);
     await context.runJournalScan(root,scan,config,async entry=>{await consume(entry,paths);if(paths.length===2)controller.cancelled=true;},controller);
     assert.deepEqual(paths,['alpha.first/1.jpg','alpha.first/nested/nested.jpg'],'Finish a user subtree before the next alphabetical user folder');
-    const cursor=JSON.parse((await database.exec('SELECT value FROM scan_job_meta WHERE scan_id=?',[scan.id]))[0].values[0][0]);
+    const cursor=JSON.parse((await database.exec('SELECT config_json FROM scan_job_meta WHERE scan_id=?',[scan.id]))[0].values[0][0]);
     assert.equal(cursor.directoryOrder,'user-folder-asc-v1');assert.equal(cursor.lastUserFolder,'alpha.first');
     const rootVisits=stats.visits.root,alphaVisits=stats.visits['alpha.first'];controller.cancelled=false;
     await context.runJournalScan(root,scan,config,entry=>consume(entry,paths),controller);
@@ -210,15 +199,15 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     assert.equal(stats.visits['alpha.first'],alphaVisits,'Resume does not re-list a previous alphabetical folder');sqlite.close();
   }
   {
-    const { sqlite, database, scan, stats } = fresh(), paths = [], controller = { cancelled: false };
+    const { sqlite, database, scan, stats } = await fresh(), paths = [], controller = { cancelled: false };
     const root = directory('root', [directory('done', [photo('a.jpg')], stats), directory('later', [], stats)], stats);
-    await database.run("INSERT INTO scan_jobs VALUES ('scan',1,'root','','directory','complete',NULL,NULL),('scan',2,'root','done','directory','complete',NULL,NULL),('scan',3,'root','later','directory','pending',NULL,NULL),('scan',4,'root','done/a.jpg','file','pending',NULL,NULL)");
+    await database.run("INSERT INTO scan_jobs(scan_id,seq,root_id,path,kind,state,occurrence_id,error) VALUES ('scan',1,'root','','directory','complete',NULL,NULL),('scan',2,'root','done','directory','complete',NULL,NULL),('scan',3,'root','later','directory','pending',NULL,NULL),('scan',4,'root','done/a.jpg','file','pending',NULL,NULL)");
     await context.runJournalScan(root, scan, config, async entry => { await consume(entry, paths); }, controller);
     assert.equal(stats.visits.done, undefined, 'Completed directories are not listed again');
     assert.equal(paths.length, 1); sqlite.close();
   }
   {
-    const { sqlite, scan, stats } = fresh(), paths = [],controller = {cancelled:false};
+    const { sqlite, scan, stats } = await fresh(), paths = [],controller = {cancelled:false};
     const root = directory('root',[photo('a.jpg')],stats);
     const result = await context.runJournalScan(root,scan,config,async entry => {await consume(entry,paths);throw Error('Preview cleanup failed after commit');},controller);
     assert.equal(result.errors.length,1,'A post-commit failure is reported');
@@ -226,7 +215,7 @@ const photo = name => ({ name, kind: 'file', async release() {} });
     sqlite.close();
   }
   {
-    const {sqlite,scan,stats}=fresh(),paths=[],controller={cancelled:false};
+    const {sqlite,scan,stats}= await fresh(),paths=[],controller={cancelled:false};
     const failing=directory('broken',[photo('a.jpg')],stats),original=failing.entries;let visits=0;
     failing.entries=async function*(){visits++;for await(const item of original.call(this))yield item;throw Error('Temporary directory listing failure');};
     const result=await context.runJournalScan(directory('root',[failing],stats),scan,config,entry=>consume(entry,paths),controller);
