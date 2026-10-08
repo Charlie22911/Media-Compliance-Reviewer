@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.3.6 — October 8, 2026
+
+- Show Creating database immediately after the destination picker closes, covering preparation and the first file save. Return to the chooser if creation fails.
+- Show save activity before checking the destination and updating local recovery data.
+
 ## 3.3.5 — October 8, 2026
 
 - Show a blocking startup screen before loading the large embedded assets in both HTML editions, with the current loading, storage, or recovery step.

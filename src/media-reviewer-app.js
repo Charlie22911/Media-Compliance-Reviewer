@@ -5475,57 +5475,69 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       if (error?.name === 'AbortError') return false;
       throw error;
     }
-    assertNoEvidenceOperation('create a database');
-    const initialVersion = await workspaceFileVersion(await handle.getFile());
-    assertNoEvidenceOperation('create a database');
-    const candidate = await new SQL.Database(),nextWorkspace = C.newWorkspace();
+    const chooserWasOpen = showDatabaseOpening(handle.name, 'Preparing the new database…', 'Creating database');
+    let failed = true;
     try {
-      await initSchema(candidate);
-      await candidate.run('INSERT OR REPLACE INTO app_meta VALUES (?,?)', ['workspace_json', JSON.stringify(C.serializeWorkspace(nextWorkspace))]);
-      await candidate.upgrade(MEDIA_DATABASE_SCHEMA);
-    } catch (error) {await candidate.close();throw error;}
-    if(recoveryPromise)try{await recoveryPromise;}catch(_){}
-    const previous = db;
-    db = candidate;ws = nextWorkspace;attachDatabaseClient(db);
-    databaseGeneration++;cancelPreviewJobs();
-    await previous?.close();
-    clearTimeout(autoSaveTimer);
-    autoSaveTimer = null;
-    autoSaveDueAt = 0;
-    upgradePending = false;
-    await installCatalog(ws);await initializePreviewBudget();
-    dbSyncSnapshot = null;
-    exportCache = null;
-    lastWorkspaceWriteAt = 0;lastRecoveryWriteAt=0;lastDatabaseBytes=0;autoSaveBaseline=Date.now();
-    workspaceFileHandle = handle;
-    workspaceWritable = false;
-    workspaceLoadedFromFile = true;
-    localSavedRevision = -1;localSaveError = '';
-    vaultKey = null;
-    evidenceMetadataCache.clear();
-    evidencePreviewCache.forEach((preview) => preview.bytes.fill(0));
-    evidencePreviewCache.clear();
-    await clearWorkspaceConflict();
-    workspaceFileVersions.set(handle, initialVersion);
-    fileByOccurrence.clear();
-    directoryHandleByRoot.clear();
-    reconnectRequest = null;
-    selected.clear();
-    pendingEvidenceKeys = [];
-    pendingInspectKey = null;
-    page = 1;
-    changeRevision = 0;
-    await setDirty();
-    await renderAll();
-    await persistRecovery();
-    await writeWorkspaceHandle(handle, true);
-    await $('#workspace-dialog').close();
-    toast('Database created. Automatic scan checkpoints are active.');
-    return true;
+      await yieldPaint();
+      assertNoEvidenceOperation('create a database');
+      const initialVersion = await workspaceFileVersion(await handle.getFile());
+      assertNoEvidenceOperation('create a database');
+      const candidate = await new SQL.Database(),nextWorkspace = C.newWorkspace();
+      try {
+        await initSchema(candidate);
+        await candidate.run('INSERT OR REPLACE INTO app_meta VALUES (?,?)', ['workspace_json', JSON.stringify(C.serializeWorkspace(nextWorkspace))]);
+        await candidate.upgrade(MEDIA_DATABASE_SCHEMA);
+      } catch (error) {await candidate.close();throw error;}
+      if(recoveryPromise)try{await recoveryPromise;}catch(_){}
+      const previous = db;
+      db = candidate;ws = nextWorkspace;attachDatabaseClient(db);
+      databaseGeneration++;cancelPreviewJobs();
+      await previous?.close();
+      clearTimeout(autoSaveTimer);
+      autoSaveTimer = null;
+      autoSaveDueAt = 0;
+      upgradePending = false;
+      await installCatalog(ws);await initializePreviewBudget();
+      dbSyncSnapshot = null;
+      exportCache = null;
+      lastWorkspaceWriteAt = 0;lastRecoveryWriteAt=0;lastDatabaseBytes=0;autoSaveBaseline=Date.now();
+      workspaceFileHandle = handle;
+      workspaceWritable = false;
+      workspaceLoadedFromFile = true;
+      localSavedRevision = -1;localSaveError = '';
+      vaultKey = null;
+      evidenceMetadataCache.clear();
+      evidencePreviewCache.forEach((preview) => preview.bytes.fill(0));
+      evidencePreviewCache.clear();
+      await clearWorkspaceConflict();
+      workspaceFileVersions.set(handle, initialVersion);
+      fileByOccurrence.clear();
+      directoryHandleByRoot.clear();
+      reconnectRequest = null;
+      selected.clear();
+      pendingEvidenceKeys = [];
+      pendingInspectKey = null;
+      page = 1;
+      changeRevision = 0;
+      await setDirty();
+      await renderAll();
+      $('#database-opening-status').textContent = 'Saving the new database file…';
+      await yieldPaint();
+      await persistRecovery();
+      await writeWorkspaceHandle(handle, true);
+      await $('#workspace-dialog').close();
+      toast('Database created. Automatic scan checkpoints are active.');
+      failed = false;
+      return true;
+    } finally {
+      $('#database-opening-dialog').close();
+      if (failed && chooserWasOpen) $('#workspace-dialog').showModal();
+    }
   }
-  function showDatabaseOpening(name, message = 'Checking database structure and saved scan records…') {
+  function showDatabaseOpening(name, message = 'Checking database structure and saved scan records…', title = 'Checking database') {
     const chooserWasOpen = $('#workspace-dialog').open;
     $('#workspace-dialog').close();
+    $('#database-opening-title').textContent = title;
     $('#database-opening-file').textContent = name || 'Saved browser copy';
     $('#database-opening-status').textContent = message;
     if (!$('#database-opening-dialog').open) $('#database-opening-dialog').showModal();
@@ -5635,6 +5647,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       if (!isCurrent()) throw new Error(
         'A queued database save was cancelled because another database is active.');
       if(quiet&&!dirty&&workspaceWritable&&!upgradePending)return lastDatabaseBytes;
+      showOperation('Saving database', 'Checking file and saving local progress');await yieldPaint();
       await assertWorkspaceFileUnchanged(handle, async () => await exportWorkspaceBytes(), isCurrent);
       try {await persistRecovery();} catch(error) {logActivity('warning','Local recovery could not be updated before the file save',error.message);}
       showOperation('Saving database', 'Preparing snapshot');await yieldPaint();
@@ -5701,6 +5714,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         }
         );
         assertNoEvidenceOperation('save the database');
+        showOperation('Saving database', 'Checking the selected destination');await yieldPaint();
         workspaceFileVersions.set(handle,
         await workspaceFileVersion(await handle.getFile()));
         assertNoEvidenceOperation('save the database');
@@ -5711,6 +5725,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       catch (error) {
         if (error?.name === 'AbortError') return;
         if (error?.name !== 'SecurityError' && error?.name !== 'NotAllowedError') throw error;
+      } finally {
+        finishOperation('Saving database');
       }
     }
     showOperation('Saving database', 'Preparing export');

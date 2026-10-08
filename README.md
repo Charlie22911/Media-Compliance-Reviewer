@@ -16,7 +16,7 @@ The main download includes its Forge wrapper, file-access prompts, database runt
 
 When you open the HTML, a **Starting Media Compliance Reviewer** screen shows the current startup step. The offline application must load its built-in components, open browser storage, and check for saved progress before the database chooser appears. This can take longer on a slower computer or after an interrupted session. Wait for the chooser; database controls stay unavailable until startup finishes. If startup fails, the screen shows the reason and a **Reload tool** button.
 
-1. Choose **Create database** for a new review or **Open existing database** to continue one. Select a writable `.sqlite` or `.db` file. After opening a file, wait for the separate **Checking database** window to close.
+1. Choose **Create database** for a new review or **Open existing database** to continue one. Select a writable `.sqlite` or `.db` file. After choosing the file, wait for **Creating database** or **Checking database** to finish. You do not need to select the file again.
 2. Choose **Select folder and scan**. Check the scan mode, file types, and exclusions, then choose **Choose folder and start scan**. You can select a local folder, mapped drive, or accessible network share. For a UNC path, paste the path into the Windows folder picker's address bar.
 3. Use **Review media while scan continues** to review early, or continue after scanning finishes. To continue an interrupted scan, choose **Resume scan** and reconnect the original folder if requested.
 4. Select items and choose a review action. Double-click a thumbnail or choose **Inspect** for a larger view, details, locations, and notes.
