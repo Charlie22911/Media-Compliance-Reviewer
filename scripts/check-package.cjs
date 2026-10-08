@@ -8,3 +8,4 @@ for(const [name,html] of [['standalone',source],['wrapper',shell],['embedded app
 }
 for(const action of ['fs_iterator_open','fs_iterator_next','fs_iterator_close','fs_release_handle','media_database_request'])assert(shell.includes(action),'Wrapper bridge: '+action);
 console.log('Embedded scripts parse and the packaged app matches its source.');
+require('./test-startup.cjs');

@@ -2227,6 +2227,17 @@ full SHA-256.</small>
 <p>Changes are saved in the browser as you work. The portable database file saves every <strong>five minutes</strong> while changes are waiting, and when scanning ends.</p>
 <p class="tiny muted">Use Save database for an immediate file save. The database status distinguishes saved local progress from the portable file's last save. A file save already in progress, Evidence work, or report export can delay the next file save.</p>
 </section>
+<section class="maintenance-panel stack">
+<h3>Database size</h3>
+<div class="field">
+<label for="evidence-database-limit">Database size limit for Evidence</label>
+<select id="evidence-database-limit" aria-describedby="evidence-database-limit-help">
+<option value="2.5">2.5 GB (default)</option>
+<option value="5">5 GB</option>
+</select>
+</div>
+<p id="evidence-database-limit-help" class="tiny muted">Checks the estimated total before adding an encrypted original. This setting is saved with the database. Normal scans can continue beyond this threshold; existing records are kept. Browser storage availability can impose a lower limit.</p>
+</section>
 <div class="notice">Protected maintenance tools require the Evidence password. They modify the database and never delete source files.</div>
 <div class="maintenance-grid">
 <section class="maintenance-panel stack">
@@ -2332,11 +2343,11 @@ destination according to your evidence-handling requirements. Stored Evidence re
 files in folders you select.</p>
 <dl class="about-details">
 <dt>Version</dt>
-<dd>3.3.1</dd>
+<dd>3.3.2</dd>
 <dt>Authored by</dt>
 <dd>IT1 McPherson, Charlie</dd>
 <dt>Release date</dt>
-<dd>October 7, 2026</dd>
+<dd>October 8, 2026</dd>
 <dt>Developed in cooperation with</dt>
 <dd>NAVAIR Prometheus Group</dd>
 </dl>
@@ -2345,7 +2356,8 @@ user. Processing stays on the local computer unless the selected folder or datab
 <button id="decoder-license-button" class="small">Decoder license</button>
 <button id="database-license-button" class="small">Database license</button>
 <h3>Change log</h3>
-<details class="change-entry" open><summary>Version 3.3.1 · October 7, 2026</summary><ul><li>Visit immediate user folders alphabetically, finish each user's subtree before moving on, and save its folder position and discovered paths for resume.</li><li>Keep successfully read Forge folder entries when a later entry in the same page fails; preserve exhausted folder errors across resumes.</li><li>Place retry, save, and review progress in a fixed Activity panel below Database.</li><li>Prepare database copies incrementally so scan and review writes can run between copy steps.</li><li>Queue review clicks on new selections, commit their audit entries with decisions, and release review actions before page refills finish.</li><li>Coalesce database status updates instead of recounting the catalog for each scanned file.</li><li>Coordinate preview decoding separately from parallel file hashing, check image headers before decoding, and retain placeholders after resource-limit failures.</li><li>Load card summaries and page duplicate locations in groups of 100; use the same matching location for display and inspection.</li><li>Report snapshot-copy progress through the Forge bridge and avoid retrying snapshots whose outcome is unknown.</li><li>Save changed portable database files every five minutes, with manual saves and a final save when scanning ends.</li><li>Recover the committed browser working database directly in both editions, including its rollback journal, without preparing a separate recovery snapshot.</li><li>Buffer SQL writes within each item transaction in batches of up to 32 commands, targeting at most 2 MiB per batch; give queued review transactions priority.</li><li>Distinguish local saving from portable file saving, and keep audit history in SQL rows instead of rewriting it in progress metadata.</li><li>Stream matching report records to the chosen file; finish scanning before exporting. Download-only browsers receive numbered report parts.</li></ul></details>
+<details class="change-entry" open><summary>Version 3.3.2 · October 8, 2026</summary><ul><li>Restore the Evidence database size selector in Maintenance so application startup completes and databases can be opened or created.</li><li>Check required startup controls in both HTML editions during package validation.</li></ul></details>
+<details class="change-entry"><summary>Version 3.3.1 · October 7, 2026</summary><ul><li>Visit immediate user folders alphabetically, finish each user's subtree before moving on, and save its folder position and discovered paths for resume.</li><li>Keep successfully read Forge folder entries when a later entry in the same page fails; preserve exhausted folder errors across resumes.</li><li>Place retry, save, and review progress in a fixed Activity panel below Database.</li><li>Prepare database copies incrementally so scan and review writes can run between copy steps.</li><li>Queue review clicks on new selections, commit their audit entries with decisions, and release review actions before page refills finish.</li><li>Coalesce database status updates instead of recounting the catalog for each scanned file.</li><li>Coordinate preview decoding separately from parallel file hashing, check image headers before decoding, and retain placeholders after resource-limit failures.</li><li>Load card summaries and page duplicate locations in groups of 100; use the same matching location for display and inspection.</li><li>Report snapshot-copy progress through the Forge bridge and avoid retrying snapshots whose outcome is unknown.</li><li>Save changed portable database files every five minutes, with manual saves and a final save when scanning ends.</li><li>Recover the committed browser working database directly in both editions, including its rollback journal, without preparing a separate recovery snapshot.</li><li>Buffer SQL writes within each item transaction in batches of up to 32 commands, targeting at most 2 MiB per batch; give queued review transactions priority.</li><li>Distinguish local saving from portable file saving, and keep audit history in SQL rows instead of rewriting it in progress metadata.</li><li>Stream matching report records to the chosen file; finish scanning before exporting. Download-only browsers receive numbered report parts.</li></ul></details>
 <details class="change-entry"><summary>Version 3.3.0 · October 6, 2026</summary><ul><li>Add configurable parallel file workers under Scan speed: default 4, adjustable from 1 to 8.</li><li>Prepare file reads, fingerprints, and common-image thumbnails concurrently, then publish results in discovery order.</li><li>Bound pending file preparation to the selected worker count; keep database publication and heavier preview decoders coordinated.</li><li>Preserve cancellation, retries, saved worker settings, and resume checkpoints with parallel preparation.</li></ul></details>
 <details class="change-entry"><summary>Version 3.2.6 · October 6, 2026</summary><ul><li>Keep folder traversal within the Forge iterator limit, including deep folder trees.</li><li>Release temporary source handles while preserving shared connections.</li><li>Retry recoverable folder reads, media reads, fingerprints, and database operations up to three times after the initial attempt.</li><li>Roll back failed database batches before replaying them, preserving completed records and pending writes.</li><li>Serialize database snapshots with scan transactions so automatic saves do not fail from transaction contention.</li></ul></details>
 <details class="change-entry"><summary>Version 3.2.5 · October 6, 2026</summary><ul><li>Constrain image previews to the thumbnail frame: Fit shows the full image and Fill crops around the center.</li><li>Select thumbnails immediately, serialize review actions, and keep uncommitted decisions out of automatic page refreshes.</li><li>Show compact loading feedback after moving items without retaining the old page height.</li><li>Add Log for activity, errors, scan stop reasons, and text export.</li><li>Keep a media failure from rolling back another operation after the media record has committed.</li></ul></details>
@@ -2577,7 +2589,7 @@ user. Processing stays on the local computer unless the selected folder or datab
 <p>Image previews are limited to 128 MiB of input and 32 megapixels. Ordinary image headers must supply readable dimensions. Unusual headers, damaged files, or resource limits can leave a placeholder while the valid scan record is kept. These limits do not guarantee a fixed total memory use.</p>
 <p>A card loads a small summary of its locations. Inspect it and use <strong>Next 100 locations</strong> or <strong>First 100 locations</strong> to browse large duplicate groups. Search results display and inspect a matching location.</p>
 <h3>Automatic saves</h3>
-<p>In <strong>Maintenance</strong>, choose a minimum automatic-save interval of 1, 5, or 15 minutes. Large databases and slow saves increase the spacing automatically. The database status shows the last successful file save. Choose <strong>Save database</strong> when you need an up-to-date portable copy.</p>
+<p>The portable database file saves every <strong>five minutes</strong> while changes are waiting and write access is available, and again when scanning ends. An active file save, Evidence operation, or report export can delay a save. The database status shows the last successful file save. Choose <strong>Save database</strong> when you need an up-to-date portable copy.</p>
 <p>Completed media records and their resume checkpoints commit together in the browser database. Local progress metadata saves about every five seconds. The portable file saves every <strong>five minutes</strong> while changes are waiting, and when scanning ends. Its interval does not increase for large databases. File saves do not overlap; Evidence work or report export may delay them. Choose <strong>Save database</strong> for an immediate file save. Portable saves still copy the complete database in small steps, allowing scan and review writes between steps. Watch <strong>Activity</strong> below Database for progress.</p>
 <h3>Export a report</h3>
 <p>Finish or cancel the scan, then choose <strong>Export report</strong>. Reports include Non-compliant items and optionally Evidence; Evidence may require its password. If it was locked before export, it is locked again afterward. Choose the CSV destination. Export shows progress and a Cancel button; review changes wait until it finishes.</p>
@@ -4114,7 +4126,7 @@ Library.
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.1', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.2', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -4142,7 +4154,7 @@ Library.
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.3.1', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.3.2', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -5132,6 +5144,8 @@ self.onmessage=async e=>{
 }
 ;
 </script>
+
+
 
 
 
@@ -6265,7 +6279,7 @@ globalThis.MEDIA_SQLITE_WASM="AGFzbQEAAAABiwREYAJ/fwF/YAF/AX9gA39/fwBgA39/fwF/YA
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.1', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.2', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -6293,7 +6307,7 @@ globalThis.MEDIA_SQLITE_WASM="AGFzbQEAAAABiwREYAJ/fwF/YAF/AX9gA39/fwBgA39/fwF/YA
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.3.1', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.3.2', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }

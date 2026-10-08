@@ -1,6 +1,6 @@
 {
   "name": "media-compliance-reviewer",
-  "version": "3.3.1",
+  "version": "3.3.2",
   "private": true,
   "scripts": {
     "build": "node scripts/build-media-database.cjs && node scripts/assemble-media-reviewer.cjs && node scripts/pack-media-reviewer.cjs",

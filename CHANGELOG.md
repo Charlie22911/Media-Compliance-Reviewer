@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.3.2 — October 8, 2026
+
+- Restore the Evidence database size selector in Maintenance so application startup completes and databases can be opened or created.
+- Check required startup controls in both HTML editions during package validation.
+
 ## 3.3.1 — October 7, 2026
 
 - Visit immediate user folders alphabetically, finish each user's subtree before moving on, and save its folder position and discovered paths for resume.
