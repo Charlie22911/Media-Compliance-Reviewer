@@ -91,6 +91,12 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   });
   window.addEventListener('media-database-progress', event => {
     const progress=event.detail;
+    if(progress.background){if(progress.warning)logActivity('warning','Temporary file cleanup deferred',progress.warning);return;}
+    if(progress.waiting){
+      if(!operationStates.has('Database waiting'))logActivity('warning','Database is taking longer than expected',progress.message);
+      showOperation('Database waiting',progress.message);window.MediaStartup?.wait(progress.message);return;
+    }
+    finishOperation('Database waiting');
     if (!databaseReady) {
       const phases={'Loading SQLite runtime':'runtime','Opening browser storage':'storage','Cleaning temporary database files':'cleanup'};
       if (Object.hasOwn(phases,progress.phase)) window.MediaStartup?.update(phases[progress.phase]);
@@ -6470,6 +6476,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   window.addEventListener('media-database-failure', event => {
     const message = event.detail?.message || 'Database worker stopped. Reopen the database before continuing.';
     logActivity('error','Database worker stopped',message);
+    finishOperation('Database waiting');
     finishOperation('Database activity');
     showOperation('Database unavailable','Reopen the database or reload and recover the browser copy');
     localSaveError = message;autoSaveError = message;

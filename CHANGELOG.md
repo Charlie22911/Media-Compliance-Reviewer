@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.3.12 — October 10, 2026
+
+- Remove abandoned-file cleanup from the startup path. Reclaim temporary copies during idle time in bounded batches, preserving recovery files and active sessions.
+- Retire unused copies without waiting for their pages to be deleted. Track imports before copying their first page so interrupted imports can be cleaned up later.
+- Give housekeeping transactions a short time budget and retry failed batches up to three times with smaller batches. Defer exhausted cleanup with a warning, while continuing foreground requests.
+- Check worker liveness after two minutes without Forge database progress. Keep responsive workers waiting with visible feedback; stop an unresponsive worker after four unanswered checks without replaying uncertain writes.
+- Preserve queued requests arriving during the final cleanup batch and update Help with waiting and recovery guidance.
+
 ## 3.3.11 — October 10, 2026
 
 - Open connected originals and current-page cached previews without waiting for thumbnail or location queries. Load additional inspector locations separately.

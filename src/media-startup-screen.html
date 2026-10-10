@@ -27,9 +27,10 @@
  let state='loading';
  const notify=body=>{if(parent!==window)parent.postMessage({__mediaStartupScreen:true,...body},'*');};
  const api=window.MediaStartup={
-  update(name){if(state!=='loading'||!Object.hasOwn(labels,name))return;phase.textContent=labels[name];notify({state:'loading',phase:name});},
+  update(name){if(state!=='loading'||!Object.hasOwn(labels,name))return;phase.textContent=labels[name];document.getElementById('media-startup-note').textContent='Please wait. Database controls will be available when startup finishes.';document.getElementById('media-startup-actions').hidden=true;notify({state:'loading',phase:name});},
+  wait(message){if(state!=='loading')return;document.getElementById('media-startup-note').textContent=String(message).slice(0,1000);document.getElementById('media-startup-actions').hidden=false;document.getElementById('media-startup-close').hidden=true;notify({state:'waiting',message});},
   complete(){state='ready';screen.close();notify({state:'ready'});},
-  fail(message){if(state!=='loading')return;state='failed';screen.setAttribute('aria-busy','false');document.getElementById('media-startup-spinner').hidden=true;document.getElementById('media-startup-title').textContent='Startup could not finish';phase.textContent=String(message||'The application could not initialize.').slice(0,1000);document.getElementById('media-startup-note').textContent='Reload the tool to try again. Database operations remain unavailable until startup succeeds.';document.getElementById('media-startup-actions').hidden=false;notify({state:'failed'});}
+  fail(message){if(state!=='loading')return;state='failed';screen.setAttribute('aria-busy','false');document.getElementById('media-startup-spinner').hidden=true;document.getElementById('media-startup-title').textContent='Startup could not finish';phase.textContent=String(message||'The application could not initialize.').slice(0,1000);document.getElementById('media-startup-note').textContent='Reload the tool to try again. Database operations remain unavailable until startup succeeds.';document.getElementById('media-startup-actions').hidden=false;document.getElementById('media-startup-close').hidden=false;notify({state:'failed'});}
  };
  screen.removeAttribute('open');screen.showModal();
  screen.addEventListener('cancel',event=>{if(state==='loading')event.preventDefault();});
@@ -39,9 +40,10 @@
   const frame=document.getElementById('forge-secure-app-frame'),message=event.data;
   if(!frame||event.source!==frame.contentWindow||message?.__mediaStartupScreen!==true)return;
   if(message.state==='loading')api.update(message.phase);
+  else if(message.state==='waiting')api.wait(message.message);
   else if(message.state==='ready')api.complete();
   else if(message.state==='failed'){state='failed';screen.close();}
-  else if(message.state==='reload'&&state==='failed')location.reload();
+  else if(message.state==='reload')location.reload();
  });
  window.addEventListener('error',event=>api.fail(event.message));
  window.addEventListener('unhandledrejection',event=>api.fail(event.reason?.message||String(event.reason||'Startup failed.')));

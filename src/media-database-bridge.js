@@ -1,13 +1,26 @@
-// First-party Forge transport. The timeout measures inactivity, not copy duration.
+// First-party Forge transport. Silence prompts a liveness check, not a write replay.
 function installMediaDatabaseBridge(token) {
- const pending=new Map(),deadline=120000;let failure=null,lastPhase='waiting for the worker';
+ const pending=new Map(),deadline=120000;let failure=null,lastPhase='waiting for the worker',probe=null,probeTimer=null;
  const send=(id,method,args)=>parent.postMessage({__mediaDatabaseRequest:true,token,id,method,args},'*');
- const settle=(id,error,result)=>{const slot=pending.get(id);if(!slot)return;pending.delete(id);clearTimeout(slot.timer);error?slot.reject(error):slot.resolve(result);};
- const arm=(id,slot)=>{clearTimeout(slot.timer);slot.timer=setTimeout(()=>{
-  failure=new Error('Database worker stopped: No database progress for two minutes during '+slot.method+'. Last active operation: '+lastPhase+'. A write may be unconfirmed. Reopen the saved database or reload and recover the browser copy before continuing.');
+ const clearProbe=()=>{clearTimeout(probeTimer);probeTimer=null;probe=null;};
+ const settle=(id,error,result)=>{const slot=pending.get(id);if(!slot)return;pending.delete(id);clearTimeout(slot.timer);if(!pending.size)clearProbe();error?slot.reject(error):slot.resolve(result);};
+ const stop=slot=>{
+  clearProbe();failure=new Error('Database worker stopped: The worker did not respond to four liveness checks during '+slot.method+'. Last active operation: '+lastPhase+'. A write may be unconfirmed. Reopen the saved database or reload and recover the browser copy before continuing.');
   parent.postMessage({__mediaDatabaseAbort:true,token,reason:failure.message},'*');
   for(const requestId of [...pending.keys()])settle(requestId,failure);
+ };
+ const check=()=>{
+  if(!probe)return;const state=probe;
+  state.id=crypto.randomUUID();state.attempt++;
+  parent.postMessage({__mediaDatabaseProbe:true,token,id:state.id},'*');
+  probeTimer=setTimeout(()=>{if(probe!==state)return;if(state.attempt>=4)stop(state.slot);else check();},15000);
+ };
+ const arm=(id,slot)=>{clearTimeout(slot.timer);slot.timer=setTimeout(()=>{
+  if(probe)return;for(const other of pending.values())clearTimeout(other.timer);
+  probe={id:null,attempt:0,slot};
+  window.dispatchEvent(new CustomEvent('media-database-progress',{detail:{phase:lastPhase,waiting:true,message:'Database work is taking longer than expected. Checking whether the worker is still responding.'}}));check();
  },deadline);};
+ const resumed=()=>{clearProbe();for(const [id,slot]of pending)arm(id,slot);};
  window.__MediaDatabaseRPC=(method,args)=>{
   if(failure){if(method==='open'||method==='recoveryGet'){failure=null;lastPhase='waiting for the worker';}else return Promise.reject(failure);}
   if(pending.size>=36)return Promise.reject(new Error('Database request queue is full. Retry when the current operation finishes.'));
@@ -16,23 +29,31 @@ function installMediaDatabaseBridge(token) {
  window.addEventListener('message',event=>{
   const message=event.data;
   if(event.source!==parent||!message||message.token!==token||!message.__mediaDatabaseResponse)return;
+  if(message.progress?.background){window.dispatchEvent(new CustomEvent('media-database-progress',{detail:message.progress}));return;}
+  if(message.probe){
+   if(!probe||message.id!==probe.id)return;
+   const phase=message.result?.phase||lastPhase;resumed();
+   window.dispatchEvent(new CustomEvent('media-database-progress',{detail:{phase,waiting:true,message:'The database worker is responding, but the operation has not reported progress. You can keep waiting, or reload the tool and recover the browser database. Close unused copies of the tool if they may be holding a lock.'}}));return;
+  }
   const slot=pending.get(message.id);
-  if(message.progress){if(slot){lastPhase=message.progress.phase||lastPhase;arm(message.id,slot);window.dispatchEvent(new CustomEvent('media-database-progress',{detail:message.progress}));}return;}
+  if(message.progress){if(slot){lastPhase=message.progress.phase||lastPhase;if(probe)resumed();else arm(message.id,slot);window.dispatchEvent(new CustomEvent('media-database-progress',{detail:message.progress}));}return;}
   if(!slot){
    // A late snapshot response still owns disk space. Never retry it anonymously.
    if(message.snapshot&&message.result?.token)window.__MediaDatabaseRPC('release',{token:message.result.token}).catch(()=>{});
    return;
   }
-  settle(message.id,message.error?Object.assign(new Error(message.error),{retrySafe:message.retrySafe===true}):null,message.result);
+  resumed();settle(message.id,message.error?Object.assign(new Error(message.error),{retrySafe:message.retrySafe===true}):null,message.result);
  });
 }
 
 function installMediaDatabaseHostBridge(token,call,getFrame) {
  const running=new Set();
+ call.background=progress=>getFrame()?.contentWindow?.postMessage({__mediaDatabaseResponse:true,token,id:null,progress},'*');
  window.addEventListener('message',async event=>{
   const message=event.data,target=getFrame()?.contentWindow;
   if(!target||event.source!==target||message?.token!==token)return;
   if(message.__mediaDatabaseAbort){call.abort?.(String(message.reason||'Database communication stopped.'));return;}
+  if(message.__mediaDatabaseProbe&&typeof message.id==='string'){call.probe?.(message.id,result=>target.postMessage({__mediaDatabaseResponse:true,token,id:message.id,probe:true,result},'*'));return;}
   if(!message.__mediaDatabaseRequest||typeof message.id!=='string')return;
   if(running.has(message.id))return; // A transport retry must not replay a mutation.
   const respond=body=>target.postMessage({__mediaDatabaseResponse:true,token,id:message.id,...body},'*');

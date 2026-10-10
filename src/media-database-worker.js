@@ -6,6 +6,8 @@ const STORAGE='photo-audit-sqlite-pages-v1',CHUNK=1024*1024,SNAPSHOT_STEP_BYTES=
 let engine,sqlite,vfs,storage,activeRequestId=null,lastProgressAt=0,lastActivityAt=0,activePhase='',activeStartedAt=0;
 const requests=[],backups=new Map(),DEFERRED=Symbol('incremental snapshot');
 let pumping=false;
+const CLEANUP_BLOCKS=32,CLEANUP_ROWS=16,CLEANUP_BUDGET_MS=1500;
+let cleanupWanted=false,cleanupTimer=null,cleanupAfter=0,cleanupLastName=null,cleanupRows=[],cleanupCandidate=null,cleanupFailures=0,cleanupBlockLimit=CLEANUP_BLOCKS;
 function progress(phase,done=0,total=0,force=false,active=false){const now=Date.now();if(!force&&now-(active?lastActivityAt:lastProgressAt)<250)return;if(active)lastActivityAt=now;else lastProgressAt=now;self.postMessage({requestId:activeRequestId,progress:{phase,done,total,...active?{active:true,elapsedMs:Math.max(0,now-activeStartedAt)}:{}}});}
 function databaseActivity(){if(activePhase)progress(activePhase,0,0,false,true);}
 const sessionId=crypto.randomUUID(),sessionLock='photo-audit-database-session:'+sessionId;
@@ -13,7 +15,7 @@ let releaseSession;
 const databases=new Map(),snapshots=new Map(),cursors=new Map();
 function getDatabase(id){const db=databases.get(id);if(!db)throw new Error('Database changed. Reopen the database before continuing.');return db;}
 const request=r=>new Promise((resolve,reject)=>{r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
-const complete=tx=>new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onabort=tx.onerror=()=>reject(tx.error||new Error('Browser storage transaction failed.'));});
+const complete=tx=>{const done=new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onabort=tx.onerror=()=>reject(tx.error||new Error('Browser storage transaction failed.'));});done.catch(()=>{});return done;};
 async function boot(){
  if(storage)return;
  progress('Loading SQLite runtime',0,0,true);
@@ -26,27 +28,73 @@ async function boot(){
  sqlite.vfs_register(vfs,true);
  storage=await request(indexedDB.open(STORAGE));
  await new Promise((resolve,reject)=>{navigator.locks.request(sessionLock,async()=>{resolve();await new Promise(done=>releaseSession=done);}).catch(reject);});
- progress('Cleaning temporary database files',0,0,true);
- await cleanupAbandonedFiles();
+ // Housekeeping is optional. Never delay startup or recovery for old copies.
+ scheduleCleanup();
  const open=vfs.jOpen.bind(vfs);
  vfs.jOpen=async(...args)=>{const result=await open(...args);if(result===SQLite.SQLITE_OK){const file=vfs.mapIdToFile.get(args[1]);file.metadata._mediaSession=sessionId;const tx=storage.transaction('metadata','readwrite'),done=complete(tx);tx.objectStore('metadata').put(file.metadata);await done;}return result;};
 }
 async function cleanupAbandonedFiles(){
- await navigator.locks.request('photo-audit-database-storage-maintenance',async()=>{
-  const tx=storage.transaction('metadata'),rows=await request(tx.objectStore('metadata').getAll()),pointer=rows.find(row=>row.name==='/recovery-pointer'),owners=new Map();
-  for(const row of rows){if(!row._mediaSession||row.name===pointer?.snapshotPath||isWorkingFile(row.name,pointer?.workingPath))continue;const files=owners.get(row._mediaSession)||[];files.push(row.name);owners.set(row._mediaSession,files);}
-  for(const [owner,files]of owners){if(owner===sessionId)continue;await navigator.locks.request('photo-audit-database-session:'+owner,{ifAvailable:true},async lock=>{if(lock)for(const path of files)await removeFile(path);});}
+ let more=true,acquired=false;
+ await navigator.locks.request('photo-audit-database-storage-maintenance',{ifAvailable:true},async lock=>{
+  if(!lock)return;acquired=true;
+  if(!cleanupCandidate){
+   if(!cleanupRows.length){
+    const {tx,done}=cleanupTransaction('metadata','readonly');
+    cleanupRows=await new Promise((resolve,reject)=>{
+     const out=[],store=tx.objectStore('metadata'),cursor=store.openCursor(cleanupLastName?IDBKeyRange.lowerBound(cleanupLastName,true):null);
+     cursor.onerror=()=>reject(cursor.error);cursor.onsuccess=()=>{try{const item=cursor.result;if(!item||out.length>=CLEANUP_ROWS){resolve(out);return;}out.push(item.value);item.continue();}catch(error){reject(error);}};
+    });
+    await done;
+    if(!cleanupRows.length){more=false;return;}
+    cleanupLastName=cleanupRows.at(-1).name;
+   }
+   while(cleanupRows.length){const row=cleanupRows.shift();if(row._mediaSession&&(row._mediaSession!==sessionId||row._mediaRetired)){cleanupCandidate=row;break;}}
+   if(!cleanupCandidate)return;
+  }
+  const candidate=cleanupCandidate;
+  const erase=async()=>{
+   const result=await deleteFileBatch(candidate);
+   if(!result.more)cleanupCandidate=null;
+   if(result.deleted)self.postMessage({requestId:null,progress:{phase:'Cleaning temporary database files',background:true,done:result.deleted,total:0}});
+  };
+  if(candidate._mediaSession===sessionId)await erase();
+  else await navigator.locks.request('photo-audit-database-session:'+candidate._mediaSession,{ifAvailable:true},async owner=>{if(owner)await erase();else cleanupCandidate=null;});
  });
+ return{more,delay:acquired?25:5000};
+}
+function wakeCleanup(delay){if(cleanupTimer)return;cleanupTimer=setTimeout(()=>{cleanupTimer=null;pump();},delay);}
+function scheduleCleanup(){cleanupWanted=true;cleanupFailures=0;cleanupLastName=null;cleanupRows=[];cleanupCandidate=null;cleanupAfter=Date.now()+2000;wakeCleanup(2000);}
+function protectedFile(path,pointer){return path==='/recovery-pointer'||isWorkingFile(path,pointer?.workingPath)||isWorkingFile(path,pointer?.snapshotPath);}
+function cleanupTransaction(stores,mode){
+ const tx=storage.transaction(stores,mode),done=complete(tx);
+ // Only these private housekeeping transactions may be aborted on a deadline.
+ const timer=setTimeout(()=>{try{tx.abort();}catch(_){}},CLEANUP_BUDGET_MS);
+ done.then(()=>clearTimeout(timer),()=>clearTimeout(timer));return{tx,done};
+}
+async function deleteFileBatch(candidate){
+ const {tx,done}=cleanupTransaction(['metadata','blocks'],'readwrite'),metadata=tx.objectStore('metadata');
+ try{
+ const pointer=await request(metadata.get('/recovery-pointer')),current=await request(metadata.get(candidate.name));
+ if(!current||current._mediaSession!==candidate._mediaSession||protectedFile(candidate.name,pointer)||
+  [...databases.values()].some(value=>isWorkingFile(candidate.name,value.path))||[...snapshots.values()].some(value=>isWorkingFile(candidate.name,value.path))){await done;return{more:false,deleted:0};}
+ let deleted=0;
+ const more=await new Promise((resolve,reject)=>{
+  const blocks=tx.objectStore('blocks'),cursor=blocks.openKeyCursor(IDBKeyRange.bound([candidate.name,-Infinity],[candidate.name,Infinity]));
+  cursor.onerror=()=>reject(cursor.error);cursor.onsuccess=()=>{try{const item=cursor.result;if(!item){metadata.delete(candidate.name);resolve(false);return;}if(deleted>=cleanupBlockLimit){resolve(true);return;}blocks.delete(item.primaryKey);deleted++;item.continue();}catch(error){reject(error);}};
+ });
+ await done;return{more,deleted};
+ }catch(error){try{tx.abort();}catch(_){}try{await done;}catch(_){}throw error;}
 }
 async function removeFile(path){
- const tx=storage.transaction(['metadata','blocks'],'readwrite');const done=complete(tx);
- tx.objectStore('metadata').delete(path);tx.objectStore('blocks').delete(IDBKeyRange.bound([path,-Infinity],[path,Infinity]));await done;
+ // Retire the inaccessible copy now; reclaim its pages between foreground work.
+ const tx=storage.transaction('metadata','readwrite'),done=complete(tx),store=tx.objectStore('metadata');
+ const pointer=await request(store.get('/recovery-pointer')),meta=await request(store.get(path));
+ if(meta&&!protectedFile(path,pointer))store.put({...meta,_mediaRetired:true});await done;scheduleCleanup();
 }
 function isWorkingFile(name,path){return Boolean(path)&&(name===path||name===path+'-journal'||name===path+'-wal'||name===path+'-shm');}
 async function recoveryPointer(){return request(storage.transaction('metadata').objectStore('metadata').get('/recovery-pointer'));}
 async function removeWorkingFiles(path){
- const rows=await request(storage.transaction('metadata').objectStore('metadata').getAll());
- for(const row of rows)if(isWorkingFile(row.name,path))await removeFile(row.name);
+ for(const suffix of ['','-journal','-wal','-shm'])await removeFile(path+suffix);
 }
 async function releaseWorkingFile(path){
  if((await recoveryPointer())?.workingPath!==path)await removeWorkingFiles(path);
@@ -56,6 +104,7 @@ async function importFile(path,input){
  let pageSize=4096;
  if(blob.size){const header=new Uint8Array(await blob.slice(0,18).arrayBuffer());if(new TextDecoder().decode(header.subarray(0,16))!=='SQLite format 3\0')throw new Error('This file is not a SQLite database.');pageSize=(header[16]<<8)|header[17];if(pageSize===1)pageSize=65536;if(pageSize<512||pageSize>65536||(pageSize&(pageSize-1)))throw new Error('Invalid SQLite page size.');}
  try{
+  const metaTx=storage.transaction('metadata','readwrite'),metaDone=complete(metaTx);metaTx.objectStore('metadata').put({name:path,fileSize:0,version:0,_mediaSession:sessionId});await metaDone;
   for(let offset=0;offset<blob.size;offset+=CHUNK){
    const data=new Uint8Array(await blob.slice(offset,offset+CHUNK).arrayBuffer());
    const tx=storage.transaction('blocks','readwrite'),done=complete(tx);for(let at=0;at<data.length;at+=pageSize)tx.objectStore('blocks').put({path,offset:-(offset+at),version:0,data:data.slice(at,at+pageSize)});await done;progress('Opening database',Math.min(offset+CHUNK,blob.size),blob.size);
@@ -68,6 +117,7 @@ async function copyFile(source,path){
  if(!meta)throw new Error('The database snapshot is no longer available.');
  let lastKey=null,lastOffset=null,copied=0;
  try{
+  const metaTx=storage.transaction('metadata','readwrite'),metaDone=complete(metaTx);metaTx.objectStore('metadata').put({name:path,fileSize:0,version:0,_mediaSession:sessionId});await metaDone;
   for(;;){
    const rows=await new Promise((resolve,reject)=>{
     const tx=storage.transaction('blocks'),out=[];let bytes=0;
@@ -267,7 +317,17 @@ async function pump(){
     try{progress(method,0,0,true);if(!Object.hasOwn(actions,method))throw new Error('Unknown database request.');const result=await actions[method](args||{});if(result!==DEFERRED){progress(method,1,1,true);self.postMessage({requestId,result});}}
     catch(error){replyError(requestId,error);}
    }else if(backup){foreground=0;await stepBackup(backup);}
-   else break;
+   else if(storage&&cleanupWanted&&cleanupAfter<=Date.now()&&!backups.size&&![...databases.values()].some(value=>value.transaction)){
+    activeRequestId=null;activePhase='Cleaning temporary database files';activeStartedAt=Date.now();
+    try{const result=await cleanupAbandonedFiles();cleanupFailures=0;cleanupWanted=result.more;cleanupAfter=Date.now()+result.delay;if(cleanupWanted)wakeCleanup(result.delay);}
+    catch(error){
+     cleanupBlockLimit=Math.max(1,Math.floor(cleanupBlockLimit/2));cleanupWanted=++cleanupFailures<=3;
+     cleanupAfter=Date.now()+500*2**(cleanupFailures-1);
+     if(cleanupWanted)wakeCleanup(cleanupAfter-Date.now());
+     else self.postMessage({requestId:null,progress:{background:true,phase:'Temporary file cleanup deferred',warning:String(error.message||error)}});
+    }
+    // Run the normal yield/queue check: new requests can arrive during cleanup.
+   }else break;
    activePhase='';
    // Give incoming review and scan requests a chance to reach the queue.
    await new Promise(resolve=>setTimeout(resolve,0));
@@ -276,6 +336,11 @@ async function pump(){
   activePhase='';pumping=false;
   const retryAt=Math.min(...[...backups.values()].filter(value=>!value.source.transaction&&value.retryAt).map(value=>value.retryAt));
   if(Number.isFinite(retryAt))setTimeout(()=>pump(),Math.max(0,retryAt-Date.now()));
+  if(cleanupWanted)wakeCleanup(Math.max(750,cleanupAfter-Date.now()));
  }
 }
-self.onmessage=e=>{requests.push(e.data);pump();};
+self.onmessage=e=>{
+ // Liveness only: never enter SQLite while an Asyncify call is suspended.
+ if(typeof e.data.probeId==='string'){self.postMessage({probeId:e.data.probeId,phase:activePhase||'Waiting for database work',elapsedMs:Math.max(0,Date.now()-activeStartedAt)});return;}
+ requests.push(e.data);pump();
+};
