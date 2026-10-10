@@ -601,6 +601,18 @@ main {
 
 .selectionbar {
 
+  position:sticky;
+
+  top:var(--app-header-height,65px);
+
+  z-index:15;
+
+  max-height:calc(100dvh - var(--app-header-height,65px) - .75rem);
+
+  overflow:auto;
+
+  box-shadow:0 4px 12px #0005;
+
   display:none;
 
   align-items:center;
@@ -1779,13 +1791,13 @@ dialog { width:min(920px,calc(100vw - 32px)); max-width:calc(100vw - 32px); max-
 dialog[open] { display:flex; flex-direction:column; }
 .modal-head { flex-shrink:0; }
 .modal-body { min-width:0; min-height:0; max-height:none; flex:1; overflow:auto; }
-.modal-body :is(p,.notice,.statusline,pre,dd),.section :is(p,label,.statusline),.selectionbar,.bulkbar { overflow-wrap:anywhere; }
+.modal-body :is(p,.notice,.statusline,pre,dd),.section :is(p,label,.statusline),.selectionbar { overflow-wrap:anywhere; }
 .modal-body .stack,.scan-grid,.maintenance-grid,.layout>*,.section,.toolbar>* { min-width:0; }
 .workspace-actions { display:flex; flex-wrap:wrap; gap:.5rem; }
 .workspace-actions button { min-width:0; white-space:normal; }
 .dashboard { grid-template-columns:repeat(4,minmax(0,1fr)); }
 .bucket { min-width:0; white-space:normal; }
-.selectionbar,.bulkbar,.inline,.toolbar,.head-actions { flex-wrap:wrap; }
+.selectionbar,.inline,.toolbar,.head-actions { flex-wrap:wrap; }
 .selectionbar>.tiny { flex:1 1 240px; min-width:0; }
 .filter-intro { margin:0; }
 .display-type-options>summary { cursor:pointer; font-weight:600; }
@@ -1811,6 +1823,7 @@ dialog[open] { display:flex; flex-direction:column; }
 }
 @media (max-width:900px) {
   .app-head { flex-wrap:wrap; position:static; }
+  .selectionbar { top:0; max-height:calc(100dvh - .75rem); }
   .layout>aside { position:static; height:auto; border-right:0; }
   .scan-grid,.maintenance-grid { grid-template-columns:1fr; }
   .inspect-layout { grid-template-columns:1fr; height:auto; }
@@ -2029,7 +2042,7 @@ Save conflict copy
 </label>
 <div class="selection-hint">Select with the checkbox, Shift/Ctrl-click thumbnails, or drag a box across cards.</div>
 </div>
-<div id="selectionbar" class="selectionbar">
+<div id="selectionbar" class="selectionbar" role="group" aria-label="Selected item actions">
 <strong id="selection-count">0 selected</strong>
 <span class="tiny">Full-hashed items include byte-identical copies in the same root. Quick-fingerprinted files are
 grouped by sampled hash; full verification applies to each original.</span>
@@ -2061,7 +2074,6 @@ grouped by sampled hash; full verification applies to each original.</span>
 <button id="page-jump" type="button" class="small">Go</button>
 </div>
 </nav>
-<div class="bulkbar" aria-label="Selected actions at bottom"><span class="bottom-selection-count"></span><button data-bulk="TO_REVIEW" class="small">To review</button><button data-bulk="COMPLIANT" class="small">Compliant</button><button data-bulk="NON_COMPLIANT" class="small danger">Non-compliant</button><button data-bulk="EVIDENCE" class="small evidence-action">Evidence</button><button data-export-evidence class="small hidden">Export selected Evidence</button><button data-purge-selected class="small danger">Purge from database</button></div>
 </main>
 </div>
 <dialog id="workspace-dialog" class="workspace-choice">
@@ -2393,7 +2405,7 @@ destination according to your evidence-handling requirements. Stored Evidence re
 files in folders you select.</p>
 <dl class="about-details">
 <dt>Version</dt>
-<dd>3.3.8</dd>
+<dd>3.3.9</dd>
 <dt>Authored by</dt>
 <dd>IT1 McPherson, Charlie</dd>
 <dt>Release date</dt>
@@ -2406,7 +2418,8 @@ user. Processing stays on the local computer unless the selected folder or datab
 <button id="decoder-license-button" class="small">Decoder license</button>
 <button id="database-license-button" class="small">Database license</button>
 <h3>Change log</h3>
-<details class="change-entry" open><summary>Version 3.3.8 · October 10, 2026</summary><ul><li>Show only total item counts on bucket tabs.</li><li>Clear the previous preview, details, and locations before loading another item in Inspect.</li><li>Show the selected item's title and a loading message immediately, and discard late image and Evidence loads after switching items or closing Inspect.</li></ul></details>
+<details class="change-entry" open><summary>Version 3.3.9 · October 10, 2026</summary><ul><li>Keep selected-item actions at the top when scrolling through results, below the app header on desktop.</li><li>Remove the duplicate action bar below pagination. Scan status, bucket totals, and search/thumbnail controls scroll away normally.</li><li>Keep action buttons accessible on smaller screens and update Help.</li></ul></details>
+<details class="change-entry"><summary>Version 3.3.8 · October 10, 2026</summary><ul><li>Show only total item counts on bucket tabs.</li><li>Clear the previous preview, details, and locations before loading another item in Inspect.</li><li>Show the selected item's title and a loading message immediately, and discard late image and Evidence loads after switching items or closing Inspect.</li></ul></details>
 <details class="change-entry"><summary>Version 3.3.7 · October 10, 2026</summary><ul><li>Reopen source files during fingerprint retries and recalculate sample ranges from the refreshed file.</li><li>Keep successful fingerprints with matching metadata, previews, and resume checkpoints. Reject changed files during full-hash verification.</li><li>Preserve browser read-error types in Log and saved scan errors, with the existing three-retry limit and cancellation behavior.</li><li>Update Help with fingerprint retry guidance.</li></ul></details>
 <details class="change-entry"><summary>Version 3.3.6 · October 8, 2026</summary><ul><li>Show Creating database after the destination picker closes, covering preparation and the first save.</li><li>Return to the chooser if creation fails.</li><li>Show save activity before checking the destination and updating local recovery data.</li></ul></details>
 <details class="change-entry"><summary>Version 3.3.5 · October 8, 2026</summary><ul><li>Show an early startup screen in both editions with the current loading, storage, or recovery step.</li><li>Keep database operations unavailable until startup finishes and the database chooser is ready.</li><li>Show a startup error and Reload tool button if initialization fails.</li><li>Update Help with startup guidance.</li></ul></details>
@@ -2640,6 +2653,7 @@ user. Processing stays on the local computer unless the selected folder or datab
 <button class="icon quiet close-dialog" aria-label="Close">×</button>
 </div>
 <div class="modal-body help-content">
+<p>Select items to show the selected-item action bar. As you scroll down past it, the bar stays at the top so you can assign those items without returning to the top of the page. Scan status, bucket totals, and the search/thumbnail controls scroll away normally. The action bar disappears when the selection is cleared.</p>
 <p>The bucket tabs show each bucket's total item count. Filters change the results and page summary, while bucket totals stay unchanged. When you switch items in <strong>Inspect</strong>, the previous preview clears and a loading message appears until the selected item's preview is ready.</p>
 <h3>Large collections and limited memory</h3>
 <p>File workers read and fingerprint files in parallel. Saved-preview decoding runs one at a time to reduce peak memory use. Results remain in discovery order. Status totals may take a few seconds to catch up.</p>
@@ -4186,7 +4200,7 @@ Library.
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.8', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.9', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -4214,7 +4228,7 @@ Library.
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.3.8', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.3.9', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -5214,6 +5228,8 @@ self.onmessage=async e=>{
 }
 ;
 </script>
+
+
 
 
 
@@ -10061,13 +10077,24 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     e.textContent = text;
     return e;
   }
+  function setupStickySelectionBar() {
+    const header = $('.app-head');let frame = 0,lastHeight = -1;
+    const update = () => {
+      frame = 0;const height = header.getBoundingClientRect().height;
+      if (height === lastHeight) return;
+      lastHeight = height;document.documentElement.style.setProperty('--app-header-height', height + 'px');
+    };
+    const schedule = () => {if (!frame) frame = requestAnimationFrame(update);};
+    update();
+    if (typeof ResizeObserver === 'function') new ResizeObserver(schedule).observe(header);
+    else window.addEventListener('resize', schedule);
+  }
   function renderSelection() {
-    $$('.bottom-selection-count').forEach((el) => el.textContent = selected.size + ' selected');
     $$('[data-bulk],[data-review]').forEach(button => button.disabled = evidenceOperationInFlight || reportExportActive);
     const bar = $('#selectionbar');
     bar.classList.toggle('show', selected.size > 0);
     $('#selection-count').textContent = `${selected.size} selected`;
-    $$('#export-evidence,[data-export-evidence]').forEach((button) => button.classList.toggle('hidden', activeBucket !== 'EVIDENCE'));
+    $('#export-evidence').classList.toggle('hidden', activeBucket !== 'EVIDENCE');
   }
   function setupDragSelection() {
     const grid = $('#results'),rect = document.createElement('div'),interactive =
@@ -12923,7 +12950,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   });
   $('#prev-page').addEventListener('click', async () => await goToPage(page - 1));
   $('#next-page').addEventListener('click', async () => await goToPage(page + 1));
-  $$('#purge-selected,[data-purge-selected]').forEach((button) => button.addEventListener('click', async () => await purgeSelected([...selected])));
+  $('#purge-selected').addEventListener('click', async () => await purgeSelected([...selected]));
   $('#inspect-prev').addEventListener('click', async () => {
     if (inspectIndex > 0) {
       inspectIndex--;
@@ -13044,7 +13071,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     link.href = url;link.download = 'media-reviewer-log-' + new Date().toISOString().slice(0,10) + '.txt';link.click();setTimeout(() => URL.revokeObjectURL(url),1000);
   });
   $('#export-report').addEventListener('click', exportReport);
-  $$('#export-evidence,[data-export-evidence]').forEach((button) => button.addEventListener('click', async () => await prepareEvidenceExport([...selected])));
+  $('#export-evidence').addEventListener('click', async () => await prepareEvidenceExport([...selected]));
   $('#evidence-export-start').addEventListener('click', async () => await
   exportSelectedEvidence([...pendingEvidenceExportKeys]));
   $('#evidence-export-cancel').addEventListener('click', async () => {
@@ -13297,6 +13324,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     try {if (upgradePending) await saveWorkspace();else toast('This database is current. Opening an older database upgrades a working copy; Save creates its upgraded file.');}
     catch (error) {toast('Upgrade copy failed: ' + error.message, true);}
   });
+  setupStickySelectionBar();
   setupDragSelection();
   window.addEventListener('media-database-failure', event => {
     const message = event.detail?.message || 'Database worker stopped. Reopen the database before continuing.';

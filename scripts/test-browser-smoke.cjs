@@ -82,6 +82,28 @@ async function findAppView(rootSession,expression,label){return waitFor(async()=
    }
    await evaluate(appSession,appContext,"document.getElementById('inspect-dialog').close()");
    console.log(edition+': bucket totals and immediate inspector clearing/reopening passed');
+   for(const width of [1024,800]){
+    await call('Emulation.setDeviceMetricsOverride',{width,height:768,deviceScaleFactor:1,mobile:false},sessionId);
+    const geometry=await evaluate(appSession,appContext,`(async()=>{
+     const paint=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+     const spacer=document.createElement('div');spacer.style.cssText='height:2400px;grid-column:1/-1';document.getElementById('results').append(spacer);
+     try{
+      window.scrollTo(0,0);document.querySelector('#results .card-check').click();await paint();
+      const bar=document.getElementById('selectionbar'),header=document.querySelector('.app-head'),initial=bar.getBoundingClientRect().top;
+      window.scrollTo(0,initial+300);await paint();
+      const box=bar.getBoundingClientRect(),inset=getComputedStyle(header).position==='sticky'?header.getBoundingClientRect().bottom:0;
+      const buttons=Array.from(bar.querySelectorAll('button')).filter(button=>getComputedStyle(button).display!=='none');
+      return{initial,top:box.top,inset,height:box.height,width:innerWidth,viewport:innerHeight,toolbarBottom:document.querySelector('.toolbar').getBoundingClientRect().bottom,bottomBar:!!document.querySelector('.bulkbar'),buttonsInside:buttons.every(button=>{const b=button.getBoundingClientRect();return b.left>=box.left-1&&b.right<=box.right+1&&b.top>=box.top-1&&b.bottom<=box.bottom+1;})};
+     }finally{spacer.remove();window.scrollTo(0,0);document.getElementById('clear-selection').click();}
+    })()`);
+    assert(geometry.initial>geometry.inset+20,'The action bar starts below the result controls');
+    assert(Math.abs(geometry.top-geometry.inset)<2,edition+': selected-item actions must remain at the top while scrolling: '+JSON.stringify(geometry));
+    assert(geometry.toolbarBottom<=geometry.inset+1,'Search and thumbnail controls scroll away before the action bar sticks');
+    assert(geometry.height<geometry.viewport-geometry.inset&&geometry.buttonsInside,'Wrapped action buttons stay visible at '+width+' pixels');
+    assert(!geometry.bottomBar,'The duplicate bottom action bar is removed');
+   }
+   await call('Emulation.clearDeviceMetricsOverride',{},sessionId);
+   console.log(edition+': sticky selected-item actions and wrapping passed at 1024x768 and 800x768');
    await completeAction('review one item',"document.querySelector('#results .card-check').click();document.querySelector('[data-bulk=COMPLIANT]').click()","document.querySelectorAll('#results .card').length===2");
    await completeAction('save review decision',"document.getElementById('save-workspace').click()","document.getElementById('toast').textContent.includes('Database saved.')");
    console.log(edition+': scan, exclusions, duplicate grouping, saved previews and bucket review passed');

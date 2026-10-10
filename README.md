@@ -87,6 +87,8 @@ If Log reports **Database worker stopped**, it includes the original failure. Re
 
 Click a thumbnail or checkbox to select it, then choose a selected-item action such as **Compliant**. The bucket tabs switch the results you are viewing. A click on another selection is queued while a review action saves; repeated clicks on the same pending items do not create duplicate actions. Page refills do not hold up the next review write. Evidence capture and report export still coordinate changes while they are running. Failed review writes retain the selection for retry. When items move out of the current bucket, a compact loading box appears while the page fills; the previous page height is released.
 
+The selected-item action bar stays at the top when you scroll past it, so you can assign items without returning to the top of a long page. Scan status, bucket totals, and the search/thumbnail controls scroll away normally. The action bar appears while items are selected; there is no duplicate bar below the results.
+
 **Fit** shows the entire image within the thumbnail frame. **Fill** fills the frame and crops around the center.
 
 ## Source and building

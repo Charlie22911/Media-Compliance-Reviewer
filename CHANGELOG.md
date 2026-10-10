@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.3.9 — October 10, 2026
+
+- Keep the selected-item action bar at the top while scrolling through results, below the app header on desktop. Scan status, bucket totals, and search/thumbnail controls scroll away normally.
+- Remove the duplicate selected-item actions below pagination. Keep action buttons wrapped and accessible on smaller screens, and adjust the sticky position when the header changes height.
+- Update Help with the selected-item action bar's scrolling behavior.
+
 ## 3.3.8 — October 10, 2026
 
 - Show only total item counts on bucket tabs and remove the filtered-count queries used for their former sublabels.

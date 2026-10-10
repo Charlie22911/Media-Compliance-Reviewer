@@ -3208,13 +3208,24 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     e.textContent = text;
     return e;
   }
+  function setupStickySelectionBar() {
+    const header = $('.app-head');let frame = 0,lastHeight = -1;
+    const update = () => {
+      frame = 0;const height = header.getBoundingClientRect().height;
+      if (height === lastHeight) return;
+      lastHeight = height;document.documentElement.style.setProperty('--app-header-height', height + 'px');
+    };
+    const schedule = () => {if (!frame) frame = requestAnimationFrame(update);};
+    update();
+    if (typeof ResizeObserver === 'function') new ResizeObserver(schedule).observe(header);
+    else window.addEventListener('resize', schedule);
+  }
   function renderSelection() {
-    $$('.bottom-selection-count').forEach((el) => el.textContent = selected.size + ' selected');
     $$('[data-bulk],[data-review]').forEach(button => button.disabled = evidenceOperationInFlight || reportExportActive);
     const bar = $('#selectionbar');
     bar.classList.toggle('show', selected.size > 0);
     $('#selection-count').textContent = `${selected.size} selected`;
-    $$('#export-evidence,[data-export-evidence]').forEach((button) => button.classList.toggle('hidden', activeBucket !== 'EVIDENCE'));
+    $('#export-evidence').classList.toggle('hidden', activeBucket !== 'EVIDENCE');
   }
   function setupDragSelection() {
     const grid = $('#results'),rect = document.createElement('div'),interactive =
@@ -6070,7 +6081,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   });
   $('#prev-page').addEventListener('click', async () => await goToPage(page - 1));
   $('#next-page').addEventListener('click', async () => await goToPage(page + 1));
-  $$('#purge-selected,[data-purge-selected]').forEach((button) => button.addEventListener('click', async () => await purgeSelected([...selected])));
+  $('#purge-selected').addEventListener('click', async () => await purgeSelected([...selected]));
   $('#inspect-prev').addEventListener('click', async () => {
     if (inspectIndex > 0) {
       inspectIndex--;
@@ -6191,7 +6202,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     link.href = url;link.download = 'media-reviewer-log-' + new Date().toISOString().slice(0,10) + '.txt';link.click();setTimeout(() => URL.revokeObjectURL(url),1000);
   });
   $('#export-report').addEventListener('click', exportReport);
-  $$('#export-evidence,[data-export-evidence]').forEach((button) => button.addEventListener('click', async () => await prepareEvidenceExport([...selected])));
+  $('#export-evidence').addEventListener('click', async () => await prepareEvidenceExport([...selected]));
   $('#evidence-export-start').addEventListener('click', async () => await
   exportSelectedEvidence([...pendingEvidenceExportKeys]));
   $('#evidence-export-cancel').addEventListener('click', async () => {
@@ -6444,6 +6455,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     try {if (upgradePending) await saveWorkspace();else toast('This database is current. Opening an older database upgrades a working copy; Save creates its upgraded file.');}
     catch (error) {toast('Upgrade copy failed: ' + error.message, true);}
   });
+  setupStickySelectionBar();
   setupDragSelection();
   window.addEventListener('media-database-failure', event => {
     const message = event.detail?.message || 'Database worker stopped. Reopen the database before continuing.';
