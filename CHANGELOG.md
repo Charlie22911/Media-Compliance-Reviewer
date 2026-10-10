@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.3.8 — October 10, 2026
+
+- Show only total item counts on bucket tabs and remove the filtered-count queries used for their former sublabels.
+- Clear the previous inspector preview, details, and locations before loading another item. Show the selected item's title and a loading message immediately.
+- Discard late image and Evidence loads after switching items or closing the inspector, and release the previous preview when closing it.
+
 ## 3.3.7 — October 10, 2026
 
 - Reopen source files when fingerprinting is retried, instead of reusing a failed file snapshot. Recalculate the hash method and sample ranges from the refreshed file.

@@ -1995,28 +1995,24 @@ Save conflict copy
 <i class="dot review">
 </i>To be reviewed</span>
 <strong class="count" id="count-TO_REVIEW">0</strong>
-<small id="visible-TO_REVIEW">Showing 0</small>
 </button>
 <button class="bucket" data-bucket="COMPLIANT" role="tab">
 <span>
 <i class="dot compliant">
 </i>Compliant</span>
 <strong class="count" id="count-COMPLIANT">0</strong>
-<small id="visible-COMPLIANT">Showing 0</small>
 </button>
 <button class="bucket" data-bucket="NON_COMPLIANT" role="tab">
 <span>
 <i class="dot noncompliant">
 </i>Non-compliant</span>
 <strong class="count" id="count-NON_COMPLIANT">0</strong>
-<small id="visible-NON_COMPLIANT">Showing 0</small>
 </button>
 <button class="bucket" data-bucket="EVIDENCE" role="tab">
 <span>
 <i class="dot evidence">
 </i>Evidence</span>
 <strong class="count" id="count-EVIDENCE">0</strong>
-<small id="visible-EVIDENCE">Locked</small>
 </button>
 </div>
 <div class="toolbar">
@@ -2397,7 +2393,7 @@ destination according to your evidence-handling requirements. Stored Evidence re
 files in folders you select.</p>
 <dl class="about-details">
 <dt>Version</dt>
-<dd>3.3.7</dd>
+<dd>3.3.8</dd>
 <dt>Authored by</dt>
 <dd>IT1 McPherson, Charlie</dd>
 <dt>Release date</dt>
@@ -2410,7 +2406,8 @@ user. Processing stays on the local computer unless the selected folder or datab
 <button id="decoder-license-button" class="small">Decoder license</button>
 <button id="database-license-button" class="small">Database license</button>
 <h3>Change log</h3>
-<details class="change-entry" open><summary>Version 3.3.7 · October 10, 2026</summary><ul><li>Reopen source files during fingerprint retries and recalculate sample ranges from the refreshed file.</li><li>Keep successful fingerprints with matching metadata, previews, and resume checkpoints. Reject changed files during full-hash verification.</li><li>Preserve browser read-error types in Log and saved scan errors, with the existing three-retry limit and cancellation behavior.</li><li>Update Help with fingerprint retry guidance.</li></ul></details>
+<details class="change-entry" open><summary>Version 3.3.8 · October 10, 2026</summary><ul><li>Show only total item counts on bucket tabs.</li><li>Clear the previous preview, details, and locations before loading another item in Inspect.</li><li>Show the selected item's title and a loading message immediately, and discard late image and Evidence loads after switching items or closing Inspect.</li></ul></details>
+<details class="change-entry"><summary>Version 3.3.7 · October 10, 2026</summary><ul><li>Reopen source files during fingerprint retries and recalculate sample ranges from the refreshed file.</li><li>Keep successful fingerprints with matching metadata, previews, and resume checkpoints. Reject changed files during full-hash verification.</li><li>Preserve browser read-error types in Log and saved scan errors, with the existing three-retry limit and cancellation behavior.</li><li>Update Help with fingerprint retry guidance.</li></ul></details>
 <details class="change-entry"><summary>Version 3.3.6 · October 8, 2026</summary><ul><li>Show Creating database after the destination picker closes, covering preparation and the first save.</li><li>Return to the chooser if creation fails.</li><li>Show save activity before checking the destination and updating local recovery data.</li></ul></details>
 <details class="change-entry"><summary>Version 3.3.5 · October 8, 2026</summary><ul><li>Show an early startup screen in both editions with the current loading, storage, or recovery step.</li><li>Keep database operations unavailable until startup finishes and the database chooser is ready.</li><li>Show a startup error and Reload tool button if initialization fails.</li><li>Update Help with startup guidance.</li></ul></details>
 <details class="change-entry"><summary>Version 3.3.4 · October 8, 2026</summary><ul><li>Keep database controls disabled with visible startup progress until storage is ready.</li><li>Prevent overlapping database-opening actions and keep the active database open until its replacement is validated.</li><li>Report the original worker failure and reject expired handles instead of repeating undefined transaction errors.</li><li>Check delayed startup, failed replacement, and reopening after a worker failure in both editions.</li></ul></details>
@@ -2643,6 +2640,7 @@ user. Processing stays on the local computer unless the selected folder or datab
 <button class="icon quiet close-dialog" aria-label="Close">×</button>
 </div>
 <div class="modal-body help-content">
+<p>The bucket tabs show each bucket's total item count. Filters change the results and page summary, while bucket totals stay unchanged. When you switch items in <strong>Inspect</strong>, the previous preview clears and a loading message appears until the selected item's preview is ready.</p>
 <h3>Large collections and limited memory</h3>
 <p>File workers read and fingerprint files in parallel. Saved-preview decoding runs one at a time to reduce peak memory use. Results remain in discovery order. Status totals may take a few seconds to catch up.</p>
 <p>Image previews are limited to 128 MiB of input and 32 megapixels. Ordinary image headers must supply readable dimensions. Unusual headers, damaged files, or resource limits can leave a placeholder while the valid scan record is kept. These limits do not guarantee a fixed total memory use.</p>
@@ -4188,7 +4186,7 @@ Library.
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.7', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.8', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -4216,7 +4214,7 @@ Library.
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.3.7', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.3.8', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -5216,6 +5214,8 @@ self.onmessage=async e=>{
 }
 ;
 </script>
+
+
 
 
 
@@ -9775,13 +9775,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   let pageTotal = 0,gridPointerActive = false,interactionUntil = 0;
   async function readCounts() {
     const totals = await catalogTotals();
-    const filtered = $('#root-filter').value || $('#search').value.trim() || $('#source-filter').checked || $('#preview-filter').checked || ws.preferences.visibleExtensions.size !== C.ALL_EXTENSIONS.length;
-    const counts = [];
-    for (const status of C.STATUSES) {
-      const total = Number(totals.get(status) || 0),shown = filtered ? await queryCardKeysAsync(status, true, null, 0, true) : total;
-      counts.push({ status, total, shown });
-    }
-    return counts;
+    return C.STATUSES.map(status => ({status, total: Number(totals.get(status) || 0)}));
   }
   function disposeCard(node) {
     if (node.__thumbUrl) releaseRenderedThumbnailUrl(node.__thumbUrl);
@@ -9841,7 +9835,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     const signature = gridQuerySignature(),revision = reviewRevision,counts = await readCounts();
     if (reviewWriteInFlight || revision !== reviewRevision || signature !== gridQuerySignature()) {gridQueryAgain = true;return;}
     if (activeBucket === 'EVIDENCE' && !vaultKey) {
-      for (const { status, total, shown } of counts) {$('#count-' + status).textContent = total;$('#visible-' + status).textContent = status === 'EVIDENCE' ? 'Locked' : 'Showing ' + shown + ' of ' + total;}
+      for (const { status, total } of counts) $('#count-' + status).textContent = total;
       visibleCards = [];await renderEvidenceLocked();return;
     }
     const inspectedKey = $('#inspect-dialog').open && inspectIndex >= 0 ? visibleCards[inspectIndex]?.key : null;
@@ -9885,7 +9879,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     // the existing card and thumbnail; preview replacements mount in one pass.
     pageTotal = requestedTotal;page = requestedPage;visibleCards = slice;renderedGridSignature = gridQuerySignature();
     if (inspectedKey) inspectIndex = visibleCards.findIndex((card) => card.key === inspectedKey);
-    for (const { status, total, shown } of counts) {$('#count-' + status).textContent = total;$('#visible-' + status).textContent = status === 'EVIDENCE' && !vaultKey ? 'Locked' : 'Showing ' + shown + ' of ' + total;}
+    for (const { status, total } of counts) $('#count-' + status).textContent = total;
     grid.style.setProperty('--thumbnail-fit', ws.preferences.thumbnailFit === 'fill' ? 'cover' : 'contain');
     grid.querySelectorAll('.empty,.evidence-locked,.results-loading').forEach((node) => node.remove());
     const wanted = new Set(slice.map((card) => card.key));
@@ -11487,12 +11481,14 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     }
   }
   async function openInspector(key) {
+    const request = ++inspectRenderToken;
     inspectIndex = visibleCards.findIndex((c) => c.key === key);
-    if (inspectIndex < 0) {const card = await cardSummary(key,captureOccurrenceFilter());if (!card) return;visibleCards = [card];inspectIndex = 0;}
-    $('#inspect-dialog').showModal();
+    if (inspectIndex < 0) {const card = await cardSummary(key,captureOccurrenceFilter());if (request !== inspectRenderToken || !card) return;visibleCards = [card];inspectIndex = 0;}
+    if (!$('#inspect-dialog').open) $('#inspect-dialog').showModal();
     zoom = 'fit';
-    await renderInspector();
-    $('#review-notes').focus();
+    const rendering = renderInspector(),token = inspectRenderToken;
+    await rendering;
+    if (token === inspectRenderToken && $('#inspect-dialog').open) $('#review-notes').focus();
   }
   async function openReconnectRequest(request) {
     reconnectRequest = request;
@@ -11560,38 +11556,42 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     }
     await openReconnectRequest(request);
   }
-  async function resetInspectorVideo() {
+  function resetInspectorVideo() {
     const video = $('#inspect-video');
+    video.classList.add('hidden');
     video.pause();
     video.onloadedmetadata = null;
     video.onerror = null;
     video.removeAttribute('src');
     video.load();
-    await video.classList.add('hidden');
   }
-  async function renderEvidenceInspector(card) {
-    const token = ++inspectRenderToken,o = card.occurrences[0],img = $('#inspect-image'),
-      video = $('#inspect-video'),placeholder = $('#inspect-placeholder'),
-      record = await getEvidenceRecord(card.key);
-    await $('#reconnect-original').classList.add('hidden');
-    await $('#verify-full-hash').classList.add('hidden');
-    await resetInspectorVideo();
-    if (inspectUrl) {
-      URL.revokeObjectURL(inspectUrl);
-      inspectUrl = null;
-    }
-    img.onload = null;
-    img.onerror = null;
-    img.removeAttribute('src');
-    await img.classList.add('hidden');
-    placeholder.textContent = 'Decrypting Evidence…';
-    placeholder.classList.remove('hidden');
-    $('#inspect-title').textContent = o?.name || 'Evidence';
+  function resetInspectorMedia() {
+    const img = $('#inspect-image');
+    img.classList.add('hidden');img.onload = null;img.onerror = null;
+    img.removeAttribute('src');img.alt = '';img.style.width = 'auto';img.style.height = 'auto';
+    resetInspectorVideo();
+    if (inspectUrl) {URL.revokeObjectURL(inspectUrl);inspectUrl = null;}
+  }
+  function beginInspectorRender(card, occurrence, message) {
+    const token = ++inspectRenderToken;
+    resetInspectorMedia();
+    const placeholder = $('#inspect-placeholder');
+    placeholder.textContent = message;placeholder.classList.remove('hidden');
+    $('#inspect-title').textContent = occurrence?.name || 'Media';
     $('#review-notes').value = card.decision.notes || '';
+    $('#metadata-list').innerHTML = '';$('#locations').innerHTML = '';
     $('#inspect-prev').disabled = inspectIndex <= 0;
     $('#inspect-next').disabled = inspectIndex >= visibleCards.length - 1;
+    $('#reconnect-original').classList.add('hidden');$('#verify-full-hash').classList.add('hidden');
+    $('#inspect-zoom-controls').classList.add('hidden');
+    return token;
+  }
+  async function renderEvidenceInspector(card) {
+    const o = card.occurrences[0],token = beginInspectorRender(card, o, 'Decrypting Evidence…'),img = $('#inspect-image'),
+      video = $('#inspect-video'),placeholder = $('#inspect-placeholder'),
+      record = await getEvidenceRecord(card.key);
+    if (token !== inspectRenderToken) return;
     const dl = $('#metadata-list');
-    dl.innerHTML = '';
     const initial = [['Status', 'EVIDENCE'], ['SHA-256', record?.hash || 'Unavailable'],
     ['Original hash method', hashMethodLabel(card.content, card.decision.hash)],
     ['Preview source', 'Encrypted Evidence original'], ['Encrypted size',
@@ -11607,7 +11607,6 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       dl.append(dt, dd);
     }
     );
-    $('#locations').innerHTML = '';
     if (!record) {
       placeholder.textContent = 'Encrypted Evidence record is missing.';
       return;
@@ -11637,6 +11636,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       if (record.version === 2 && record.originalSize > EVIDENCE_DISPLAY_LIMIT) {
         const preview = evidencePreviewCache.get(card.key) || (await decryptEvidencePreview(
           vaultKey, record, meta));
+        if (token !== inspectRenderToken) return;
         if (!preview) throw new Error(
           'The protected original is too large to display and has no encrypted preview.');
         inspectUrl = URL.createObjectURL(new Blob([preview.bytes], {
@@ -11646,7 +11646,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         img.alt = 'Encrypted Evidence preview of ' + (source.name || 'media');
         img.src = inspectUrl;
         img.classList.remove('hidden');
-        await placeholder.classList.add('hidden');
+        placeholder.classList.add('hidden');
         $('#inspect-zoom-controls').classList.remove('hidden');
         setMetadataValue('Preview source', 'Encrypted saved preview · original preserved');
         const dimDt = document.createElement('dt'),dimDd = document.createElement('dd');
@@ -11657,6 +11657,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       }
       const evidenceBytes = await decryptEvidenceOriginal(vaultKey, record);
       try {
+        if (token !== inspectRenderToken) return;
         if (mediaKind === 'video') inspectUrl = URL.createObjectURL(new Blob([evidenceBytes], {
           type: source.browserMime || 'application/octet-stream'
         }
@@ -11664,6 +11665,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
 
         if (['tif', 'tiff', 'heic', 'heif'].includes(String(source.extension || '').toLowerCase())) {
           const display = await formatDisplayBlob(evidenceBytes, String(source.extension).toLowerCase());
+          if (token !== inspectRenderToken) return;
           inspectUrl = URL.createObjectURL(display.blob);
           setMetadataValue('Preview source', 'Decrypted TIFF · decoded offline');
         } else
@@ -11676,7 +11678,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         evidenceBytes.fill(0);
       }
       if (mediaKind === 'video') {
-        await $('#inspect-zoom-controls').classList.add('hidden');
+        $('#inspect-zoom-controls').classList.add('hidden');
         video.onloadedmetadata = () => {
           if (token !== inspectRenderToken) return;
           setMetadataValue('Preview source', 'Decrypted Evidence original');
@@ -11687,7 +11689,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
 
         video.onerror = async () => {
           if (token !== inspectRenderToken) return;
-          await video.classList.add('hidden');
+          video.classList.add('hidden');
           placeholder.textContent = 'The browser cannot play this decrypted video.';
           placeholder.classList.remove('hidden');
         };
@@ -11698,7 +11700,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         dl.append(dimDt, dimDd);
         video.src = inspectUrl;
         video.classList.remove('hidden');
-        await placeholder.classList.add('hidden');
+        placeholder.classList.add('hidden');
         return;
       }
       $('#inspect-zoom-controls').classList.remove('hidden');
@@ -11715,7 +11717,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
 
       img.onerror = async () => {
         if (token !== inspectRenderToken) return;
-        await img.classList.add('hidden');
+        img.classList.add('hidden');
         placeholder.textContent = 'The decrypted original cannot be displayed by this browser.';
         placeholder.classList.remove('hidden');
       };
@@ -11726,7 +11728,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       dl.append(dimDt, dimDd);
       img.src = inspectUrl;
       img.classList.remove('hidden');
-      await placeholder.classList.add('hidden');
+      placeholder.classList.add('hidden');
     }
     catch (error) {
       if (token !== inspectRenderToken) return;
@@ -11741,30 +11743,15 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       await renderEvidenceInspector(card);
       return;
     }
-    const token = ++inspectRenderToken,o = matchingFor(card)[0] || card.occurrences[0],
+    const o = matchingFor(card)[0] || card.occurrences[0],token = beginInspectorRender(card, o, 'Loading preview…'),
       img = $('#inspect-image'),video = $('#inspect-video'),
       placeholder = $('#inspect-placeholder'),po = previewOccurrence(card),
       mediaKind = C.mediaKindForExtension(o.extension),
       locationUrl = po || mediaKind === 'video' ? null : persistedFileUrl(o),saved = await getThumbnail(o.hash),
       root = ws.roots[o.rootId] || {
       };
-
-    await resetInspectorVideo();
-    if (inspectUrl) {
-      URL.revokeObjectURL(inspectUrl);
-      inspectUrl = null;
-    }
-    img.onload = null;
-    img.onerror = null;
-    img.removeAttribute('src');
-    await img.classList.add('hidden');
+    if (token !== inspectRenderToken) return;
     $('#inspect-zoom-controls').classList.toggle('hidden', mediaKind === 'video');
-    placeholder.classList.remove('hidden');
-    placeholder.textContent = 'Loading preview…';
-    $('#inspect-title').textContent = o.name;
-    $('#review-notes').value = card.decision.notes || '';
-    $('#inspect-prev').disabled = inspectIndex <= 0;
-    $('#inspect-next').disabled = inspectIndex >= visibleCards.length - 1;
     $('#reconnect-original').classList.toggle('hidden', Boolean(po));
     const initialSource = po ? 'Loading original from reconnected folder…' : locationUrl ?
       'Trying saved file location…' : saved ? 'Saved 256 px preview' : 'Unavailable',
@@ -11856,7 +11843,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
 
         video.onerror = async () => {
           if (token !== inspectRenderToken) return;
-          await video.classList.add('hidden');
+          video.classList.add('hidden');
           if (inspectUrl) {
             URL.revokeObjectURL(inspectUrl);
             inspectUrl = null;
@@ -11881,7 +11868,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         await placeholder.classList.add('hidden');
       },
       fail = async (message) => {
-        await img.classList.add('hidden');
+        img.classList.add('hidden');
         placeholder.textContent = message;
         placeholder.classList.remove('hidden');
         setMetadataValue('Preview source', 'Unavailable');
@@ -11917,6 +11904,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     };
 
     const showOriginal = async (url, label, isObjectUrl, sourceDimensions = null) => {
+      if (token !== inspectRenderToken) {if (isObjectUrl) URL.revokeObjectURL(url);return;}
       if (isObjectUrl) inspectUrl = url;
       img.onload = () => {
         if (token !== inspectRenderToken) return;
@@ -11957,6 +11945,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           return;
         }
         await C.checkPreviewInput(file,o.extension);
+        if (token !== inspectRenderToken) return;
         await showOriginal(URL.createObjectURL(o.extension === 'svg' ? new Blob([file], { type: 'image/svg+xml' }) : file),
         'Original source · folder reconnected', true);
       }
@@ -13041,13 +13030,10 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     reconnectRequest = null;
   }
   );
-  $('#inspect-dialog').addEventListener('close', async () => {
+  $('#inspect-dialog').addEventListener('close', () => {
+    if ($('#inspect-dialog').open) return; // A queued close event may belong to the previous opening.
     inspectRenderToken++;
-    await resetInspectorVideo();
-    if (inspectUrl) {
-      URL.revokeObjectURL(inspectUrl);
-      inspectUrl = null;
-    }
+    resetInspectorMedia();
   }
   );
   $('#about-button').addEventListener('click', () => $('#about-dialog').showModal());

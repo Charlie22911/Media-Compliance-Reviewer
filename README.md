@@ -19,7 +19,7 @@ When you open the HTML, a **Starting Media Compliance Reviewer** screen shows th
 1. Choose **Create database** for a new review or **Open existing database** to continue one. Select a writable `.sqlite` or `.db` file. After choosing the file, wait for **Creating database** or **Checking database** to finish. You do not need to select the file again.
 2. Choose **Select folder and scan**. Check the scan mode, file types, and exclusions, then choose **Choose folder and start scan**. You can select a local folder, mapped drive, or accessible network share. For a UNC path, paste the path into the Windows folder picker's address bar.
 3. Use **Review media while scan continues** to review early, or continue after scanning finishes. To continue an interrupted scan, choose **Resume scan** and reconnect the original folder if requested.
-4. Select items and choose a review action. Double-click a thumbnail or choose **Inspect** for a larger view, details, locations, and notes.
+4. Select items and choose a review action. Double-click a thumbnail or choose **Inspect** for a larger view, details, locations, and notes. When switching items, the previous preview clears and a loading message appears until the selected item's preview is ready.
 5. Progress is saved in the browser as you work. The portable database file saves automatically every **five minutes** when changes are waiting and write access is available, and again when scanning ends. Choose **Save database** whenever you need an up-to-date file, then wait for saving to finish before moving it.
 
 Use the app's **Help** button for detailed instructions and **About** for the version, changelog, and decoder licenses.
@@ -32,6 +32,7 @@ Use the app's **Help** button for detailed instructions and **About** for the ve
 - Scan exclusions can skip Application Data inside user folders and files last modified more than a chosen number of years ago. Zero years includes all ages. ZIP scanning is optional.
 - Large files can use sampled quick fingerprints. A quick fingerprint is a candidate match, not a full-file verification. Evidence capture verifies a full SHA-256 before preserving an original.
 - Results start in **Found order · first found first**. Search, scanned-folder and file-type controls narrow the displayed results without changing scan settings.
+- Bucket tabs show each bucket's total item count. Filters change the results and page summary, while bucket totals stay unchanged.
 - Choose 20, 40, 60, 100, or 200 **Items per page**, or enter a page number and press **Go** or Enter. Changing pages or sort order clears the current selection.
 
 ## Saved previews and originals

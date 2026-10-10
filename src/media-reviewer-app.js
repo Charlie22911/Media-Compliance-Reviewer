@@ -2922,13 +2922,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   let pageTotal = 0,gridPointerActive = false,interactionUntil = 0;
   async function readCounts() {
     const totals = await catalogTotals();
-    const filtered = $('#root-filter').value || $('#search').value.trim() || $('#source-filter').checked || $('#preview-filter').checked || ws.preferences.visibleExtensions.size !== C.ALL_EXTENSIONS.length;
-    const counts = [];
-    for (const status of C.STATUSES) {
-      const total = Number(totals.get(status) || 0),shown = filtered ? await queryCardKeysAsync(status, true, null, 0, true) : total;
-      counts.push({ status, total, shown });
-    }
-    return counts;
+    return C.STATUSES.map(status => ({status, total: Number(totals.get(status) || 0)}));
   }
   function disposeCard(node) {
     if (node.__thumbUrl) releaseRenderedThumbnailUrl(node.__thumbUrl);
@@ -2988,7 +2982,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     const signature = gridQuerySignature(),revision = reviewRevision,counts = await readCounts();
     if (reviewWriteInFlight || revision !== reviewRevision || signature !== gridQuerySignature()) {gridQueryAgain = true;return;}
     if (activeBucket === 'EVIDENCE' && !vaultKey) {
-      for (const { status, total, shown } of counts) {$('#count-' + status).textContent = total;$('#visible-' + status).textContent = status === 'EVIDENCE' ? 'Locked' : 'Showing ' + shown + ' of ' + total;}
+      for (const { status, total } of counts) $('#count-' + status).textContent = total;
       visibleCards = [];await renderEvidenceLocked();return;
     }
     const inspectedKey = $('#inspect-dialog').open && inspectIndex >= 0 ? visibleCards[inspectIndex]?.key : null;
@@ -3032,7 +3026,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     // the existing card and thumbnail; preview replacements mount in one pass.
     pageTotal = requestedTotal;page = requestedPage;visibleCards = slice;renderedGridSignature = gridQuerySignature();
     if (inspectedKey) inspectIndex = visibleCards.findIndex((card) => card.key === inspectedKey);
-    for (const { status, total, shown } of counts) {$('#count-' + status).textContent = total;$('#visible-' + status).textContent = status === 'EVIDENCE' && !vaultKey ? 'Locked' : 'Showing ' + shown + ' of ' + total;}
+    for (const { status, total } of counts) $('#count-' + status).textContent = total;
     grid.style.setProperty('--thumbnail-fit', ws.preferences.thumbnailFit === 'fill' ? 'cover' : 'contain');
     grid.querySelectorAll('.empty,.evidence-locked,.results-loading').forEach((node) => node.remove());
     const wanted = new Set(slice.map((card) => card.key));
@@ -4634,12 +4628,14 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     }
   }
   async function openInspector(key) {
+    const request = ++inspectRenderToken;
     inspectIndex = visibleCards.findIndex((c) => c.key === key);
-    if (inspectIndex < 0) {const card = await cardSummary(key,captureOccurrenceFilter());if (!card) return;visibleCards = [card];inspectIndex = 0;}
-    $('#inspect-dialog').showModal();
+    if (inspectIndex < 0) {const card = await cardSummary(key,captureOccurrenceFilter());if (request !== inspectRenderToken || !card) return;visibleCards = [card];inspectIndex = 0;}
+    if (!$('#inspect-dialog').open) $('#inspect-dialog').showModal();
     zoom = 'fit';
-    await renderInspector();
-    $('#review-notes').focus();
+    const rendering = renderInspector(),token = inspectRenderToken;
+    await rendering;
+    if (token === inspectRenderToken && $('#inspect-dialog').open) $('#review-notes').focus();
   }
   async function openReconnectRequest(request) {
     reconnectRequest = request;
@@ -4707,38 +4703,42 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     }
     await openReconnectRequest(request);
   }
-  async function resetInspectorVideo() {
+  function resetInspectorVideo() {
     const video = $('#inspect-video');
+    video.classList.add('hidden');
     video.pause();
     video.onloadedmetadata = null;
     video.onerror = null;
     video.removeAttribute('src');
     video.load();
-    await video.classList.add('hidden');
   }
-  async function renderEvidenceInspector(card) {
-    const token = ++inspectRenderToken,o = card.occurrences[0],img = $('#inspect-image'),
-      video = $('#inspect-video'),placeholder = $('#inspect-placeholder'),
-      record = await getEvidenceRecord(card.key);
-    await $('#reconnect-original').classList.add('hidden');
-    await $('#verify-full-hash').classList.add('hidden');
-    await resetInspectorVideo();
-    if (inspectUrl) {
-      URL.revokeObjectURL(inspectUrl);
-      inspectUrl = null;
-    }
-    img.onload = null;
-    img.onerror = null;
-    img.removeAttribute('src');
-    await img.classList.add('hidden');
-    placeholder.textContent = 'Decrypting Evidence…';
-    placeholder.classList.remove('hidden');
-    $('#inspect-title').textContent = o?.name || 'Evidence';
+  function resetInspectorMedia() {
+    const img = $('#inspect-image');
+    img.classList.add('hidden');img.onload = null;img.onerror = null;
+    img.removeAttribute('src');img.alt = '';img.style.width = 'auto';img.style.height = 'auto';
+    resetInspectorVideo();
+    if (inspectUrl) {URL.revokeObjectURL(inspectUrl);inspectUrl = null;}
+  }
+  function beginInspectorRender(card, occurrence, message) {
+    const token = ++inspectRenderToken;
+    resetInspectorMedia();
+    const placeholder = $('#inspect-placeholder');
+    placeholder.textContent = message;placeholder.classList.remove('hidden');
+    $('#inspect-title').textContent = occurrence?.name || 'Media';
     $('#review-notes').value = card.decision.notes || '';
+    $('#metadata-list').innerHTML = '';$('#locations').innerHTML = '';
     $('#inspect-prev').disabled = inspectIndex <= 0;
     $('#inspect-next').disabled = inspectIndex >= visibleCards.length - 1;
+    $('#reconnect-original').classList.add('hidden');$('#verify-full-hash').classList.add('hidden');
+    $('#inspect-zoom-controls').classList.add('hidden');
+    return token;
+  }
+  async function renderEvidenceInspector(card) {
+    const o = card.occurrences[0],token = beginInspectorRender(card, o, 'Decrypting Evidence…'),img = $('#inspect-image'),
+      video = $('#inspect-video'),placeholder = $('#inspect-placeholder'),
+      record = await getEvidenceRecord(card.key);
+    if (token !== inspectRenderToken) return;
     const dl = $('#metadata-list');
-    dl.innerHTML = '';
     const initial = [['Status', 'EVIDENCE'], ['SHA-256', record?.hash || 'Unavailable'],
     ['Original hash method', hashMethodLabel(card.content, card.decision.hash)],
     ['Preview source', 'Encrypted Evidence original'], ['Encrypted size',
@@ -4754,7 +4754,6 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       dl.append(dt, dd);
     }
     );
-    $('#locations').innerHTML = '';
     if (!record) {
       placeholder.textContent = 'Encrypted Evidence record is missing.';
       return;
@@ -4784,6 +4783,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       if (record.version === 2 && record.originalSize > EVIDENCE_DISPLAY_LIMIT) {
         const preview = evidencePreviewCache.get(card.key) || (await decryptEvidencePreview(
           vaultKey, record, meta));
+        if (token !== inspectRenderToken) return;
         if (!preview) throw new Error(
           'The protected original is too large to display and has no encrypted preview.');
         inspectUrl = URL.createObjectURL(new Blob([preview.bytes], {
@@ -4793,7 +4793,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         img.alt = 'Encrypted Evidence preview of ' + (source.name || 'media');
         img.src = inspectUrl;
         img.classList.remove('hidden');
-        await placeholder.classList.add('hidden');
+        placeholder.classList.add('hidden');
         $('#inspect-zoom-controls').classList.remove('hidden');
         setMetadataValue('Preview source', 'Encrypted saved preview · original preserved');
         const dimDt = document.createElement('dt'),dimDd = document.createElement('dd');
@@ -4804,6 +4804,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       }
       const evidenceBytes = await decryptEvidenceOriginal(vaultKey, record);
       try {
+        if (token !== inspectRenderToken) return;
         if (mediaKind === 'video') inspectUrl = URL.createObjectURL(new Blob([evidenceBytes], {
           type: source.browserMime || 'application/octet-stream'
         }
@@ -4811,6 +4812,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
 
         if (['tif', 'tiff', 'heic', 'heif'].includes(String(source.extension || '').toLowerCase())) {
           const display = await formatDisplayBlob(evidenceBytes, String(source.extension).toLowerCase());
+          if (token !== inspectRenderToken) return;
           inspectUrl = URL.createObjectURL(display.blob);
           setMetadataValue('Preview source', 'Decrypted TIFF · decoded offline');
         } else
@@ -4823,7 +4825,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         evidenceBytes.fill(0);
       }
       if (mediaKind === 'video') {
-        await $('#inspect-zoom-controls').classList.add('hidden');
+        $('#inspect-zoom-controls').classList.add('hidden');
         video.onloadedmetadata = () => {
           if (token !== inspectRenderToken) return;
           setMetadataValue('Preview source', 'Decrypted Evidence original');
@@ -4834,7 +4836,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
 
         video.onerror = async () => {
           if (token !== inspectRenderToken) return;
-          await video.classList.add('hidden');
+          video.classList.add('hidden');
           placeholder.textContent = 'The browser cannot play this decrypted video.';
           placeholder.classList.remove('hidden');
         };
@@ -4845,7 +4847,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         dl.append(dimDt, dimDd);
         video.src = inspectUrl;
         video.classList.remove('hidden');
-        await placeholder.classList.add('hidden');
+        placeholder.classList.add('hidden');
         return;
       }
       $('#inspect-zoom-controls').classList.remove('hidden');
@@ -4862,7 +4864,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
 
       img.onerror = async () => {
         if (token !== inspectRenderToken) return;
-        await img.classList.add('hidden');
+        img.classList.add('hidden');
         placeholder.textContent = 'The decrypted original cannot be displayed by this browser.';
         placeholder.classList.remove('hidden');
       };
@@ -4873,7 +4875,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       dl.append(dimDt, dimDd);
       img.src = inspectUrl;
       img.classList.remove('hidden');
-      await placeholder.classList.add('hidden');
+      placeholder.classList.add('hidden');
     }
     catch (error) {
       if (token !== inspectRenderToken) return;
@@ -4888,30 +4890,15 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       await renderEvidenceInspector(card);
       return;
     }
-    const token = ++inspectRenderToken,o = matchingFor(card)[0] || card.occurrences[0],
+    const o = matchingFor(card)[0] || card.occurrences[0],token = beginInspectorRender(card, o, 'Loading preview…'),
       img = $('#inspect-image'),video = $('#inspect-video'),
       placeholder = $('#inspect-placeholder'),po = previewOccurrence(card),
       mediaKind = C.mediaKindForExtension(o.extension),
       locationUrl = po || mediaKind === 'video' ? null : persistedFileUrl(o),saved = await getThumbnail(o.hash),
       root = ws.roots[o.rootId] || {
       };
-
-    await resetInspectorVideo();
-    if (inspectUrl) {
-      URL.revokeObjectURL(inspectUrl);
-      inspectUrl = null;
-    }
-    img.onload = null;
-    img.onerror = null;
-    img.removeAttribute('src');
-    await img.classList.add('hidden');
+    if (token !== inspectRenderToken) return;
     $('#inspect-zoom-controls').classList.toggle('hidden', mediaKind === 'video');
-    placeholder.classList.remove('hidden');
-    placeholder.textContent = 'Loading preview…';
-    $('#inspect-title').textContent = o.name;
-    $('#review-notes').value = card.decision.notes || '';
-    $('#inspect-prev').disabled = inspectIndex <= 0;
-    $('#inspect-next').disabled = inspectIndex >= visibleCards.length - 1;
     $('#reconnect-original').classList.toggle('hidden', Boolean(po));
     const initialSource = po ? 'Loading original from reconnected folder…' : locationUrl ?
       'Trying saved file location…' : saved ? 'Saved 256 px preview' : 'Unavailable',
@@ -5003,7 +4990,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
 
         video.onerror = async () => {
           if (token !== inspectRenderToken) return;
-          await video.classList.add('hidden');
+          video.classList.add('hidden');
           if (inspectUrl) {
             URL.revokeObjectURL(inspectUrl);
             inspectUrl = null;
@@ -5028,7 +5015,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         await placeholder.classList.add('hidden');
       },
       fail = async (message) => {
-        await img.classList.add('hidden');
+        img.classList.add('hidden');
         placeholder.textContent = message;
         placeholder.classList.remove('hidden');
         setMetadataValue('Preview source', 'Unavailable');
@@ -5064,6 +5051,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     };
 
     const showOriginal = async (url, label, isObjectUrl, sourceDimensions = null) => {
+      if (token !== inspectRenderToken) {if (isObjectUrl) URL.revokeObjectURL(url);return;}
       if (isObjectUrl) inspectUrl = url;
       img.onload = () => {
         if (token !== inspectRenderToken) return;
@@ -5104,6 +5092,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           return;
         }
         await C.checkPreviewInput(file,o.extension);
+        if (token !== inspectRenderToken) return;
         await showOriginal(URL.createObjectURL(o.extension === 'svg' ? new Blob([file], { type: 'image/svg+xml' }) : file),
         'Original source · folder reconnected', true);
       }
@@ -6188,13 +6177,10 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     reconnectRequest = null;
   }
   );
-  $('#inspect-dialog').addEventListener('close', async () => {
+  $('#inspect-dialog').addEventListener('close', () => {
+    if ($('#inspect-dialog').open) return; // A queued close event may belong to the previous opening.
     inspectRenderToken++;
-    await resetInspectorVideo();
-    if (inspectUrl) {
-      URL.revokeObjectURL(inspectUrl);
-      inspectUrl = null;
-    }
+    resetInspectorMedia();
   }
   );
   $('#about-button').addEventListener('click', () => $('#about-dialog').showModal());

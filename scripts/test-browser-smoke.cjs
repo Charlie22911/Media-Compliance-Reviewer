@@ -73,6 +73,15 @@ async function findAppView(rootSession,expression,label){return waitFor(async()=
    await evaluate(appSession,appContext,"document.getElementById('continue-review').click()");
    await waitFor(()=>evaluate(appSession,appContext,"document.querySelectorAll('#results .card').length===3&&Array.from(document.querySelectorAll('#results .thumb img')).filter(img=>img.complete&&img.naturalWidth>0).length===3"),'three unique cards and saved previews');
    assert(await evaluate(appSession,appContext,"document.getElementById('results').textContent.includes('2 locations')"),'Duplicate locations are grouped');
+   assert.deepEqual(await evaluate(appSession,appContext,"Array.from(document.querySelectorAll('.bucket .count'),node=>Number(node.textContent))"),[3,0,0,0],'Bucket tabs show overall totals');
+   assert(await evaluate(appSession,appContext,"!document.querySelector('.bucket small')"),'Bucket tabs omit filtered-count labels');
+   for(const index of [0,1]){
+    const state=await evaluate(appSession,appContext,`(()=>{document.getElementById('inspect-dialog').close();const card=document.querySelectorAll('#results .card')[${index}];const name=card.querySelector('.filename').textContent;card.querySelector('.card-foot button').click();const image=document.getElementById('inspect-image');return{name,title:document.getElementById('inspect-title').textContent,hidden:image.classList.contains('hidden'),source:image.getAttribute('src'),details:document.getElementById('metadata-list').textContent,loading:document.getElementById('inspect-placeholder').textContent};})()`);
+    assert.equal(state.title,state.name);assert(state.hidden,'Old previews clear before loading the next item');assert.equal(state.source,null);assert.equal(state.details,'');assert.equal(state.loading,'Loading preview…');
+    await waitFor(()=>evaluate(appSession,appContext,"(()=>{const image=document.getElementById('inspect-image');return document.getElementById('inspect-dialog').open&&!image.classList.contains('hidden')&&image.complete&&image.naturalWidth>0;})()"),'inspected preview loads after close/reopen');
+   }
+   await evaluate(appSession,appContext,"document.getElementById('inspect-dialog').close()");
+   console.log(edition+': bucket totals and immediate inspector clearing/reopening passed');
    await completeAction('review one item',"document.querySelector('#results .card-check').click();document.querySelector('[data-bulk=COMPLIANT]').click()","document.querySelectorAll('#results .card').length===2");
    await completeAction('save review decision',"document.getElementById('save-workspace').click()","document.getElementById('toast').textContent.includes('Database saved.')");
    console.log(edition+': scan, exclusions, duplicate grouping, saved previews and bucket review passed');
