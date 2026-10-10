@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.3.7 — October 10, 2026
+
+- Reopen source files when fingerprinting is retried, instead of reusing a failed file snapshot. Recalculate the hash method and sample ranges from the refreshed file.
+- Keep the successful file's metadata, preview, and resume checkpoint together. Reject changed files during full-hash verification.
+- Preserve browser read-error types in Log and saved scan errors. Keep the existing three-retry limit and cancellation behavior.
+- Update Help with fingerprint retry guidance.
+
 ## 3.3.6 — October 8, 2026
 
 - Show Creating database immediately after the destination picker closes, covering preparation and the first file save. Return to the chooser if creation fails.

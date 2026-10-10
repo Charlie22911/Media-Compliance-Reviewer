@@ -7,7 +7,7 @@ vm.createContext(context);
 vm.runInContext(fs.readFileSync(path.join(sourceRoot, 'src/media-reviewer-core.js'), 'utf8'), context);
 context.C = context.ImageReviewerCore;
 const app = fs.readFileSync(path.join(sourceRoot, 'src/media-reviewer-app.js'), 'utf8');
-for (const name of ['hashFile', 'boundedScanRead', 'scanRetry', 'createScanQueue', 'runPreparedEntries', 'runJournalScan']) {
+for (const name of ['hashFile', 'boundedScanRead', 'scanErrorMessage', 'scanRetry', 'createScanQueue', 'runPreparedEntries', 'runJournalScan']) {
   const code = new RegExp('(?:async )?function ' + name + '\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}').exec(app);
   assert(code, name); vm.runInContext(code[0], context);
 }

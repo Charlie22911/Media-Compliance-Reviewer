@@ -3446,7 +3446,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
             await finish(reject, new Error('Incomplete or invalid hash result.'));return;
           }
           await finish(resolve, m.hash);
-        } else if (m.type === 'error' || m.type === 'cancelled') await finish(reject, new Error(m.message || m.type));
+        } else if (m.type === 'error' || m.type === 'cancelled') await finish(reject,
+          Object.assign(new Error(m.message || m.type), {name: m.type === 'cancelled' ? 'AbortError' : m.name || 'Error'}));
       };
       controller.cancelCurrent = async () => await finish(reject, new DOMException('Scan cancelled', 'AbortError'));
       worker.addEventListener('message', handler);worker.addEventListener('error', failure);worker.addEventListener('messageerror', failure);
@@ -3685,11 +3686,31 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       Promise.resolve(promise).then(async (value) => await finish(null, value), async (error) => await finish(error));
     });
   }
+  function scanErrorMessage(error) {
+    const message = String(error?.message || error);
+    return error?.name && error.name !== 'Error' ? error.name + ': ' + message : message;
+  }
   async function scanRetry(operation, controller, label) {
     try {return await C.retryOperation(operation,{controller,onRetry:(error,attempt)=>{
-      logActivity('warning','Retrying scan operation (' + attempt + ' of 3)',label + ': ' + String(error.message || error));
+      logActivity('warning','Retrying scan operation (' + attempt + ' of 3)',label + ': ' + scanErrorMessage(error));
       showOperation('Scan recovery',label + ' — retry ' + attempt + ' of 3');
     }});} finally {finishOperation('Scan recovery');}
+  }
+  async function fingerprintScanEntry(entry, file, controller, scanConfig, onProgress, fullHash = false) {
+    const size = file.size, lastModified = file.lastModified;
+    return scanRetry(async attempt => {
+      // A File is a snapshot. Reusing it after a read failure cannot recover a
+      // stale snapshot; reopen through the entry without nesting retry loops.
+      if (attempt) file = await boundedScanRead(entry.getFile(), controller, 'Reopening media file');
+      if (!Number.isSafeInteger(file.size) || file.size <= 0) throw new Error('Empty or invalid media file.');
+      // Full verification must still describe the earlier successful sample.
+      if (fullHash && (file.size !== size || file.lastModified !== lastModified))
+        throw new Error('Source changed during scan; the earlier fingerprint is invalid.');
+      const quick = !fullHash && C.shouldUseQuickHash(C.extensionOf(file.name), file.size, scanConfig);
+      const digest = await hashFile(controller, file, C.cryptoRandom(), onProgress,
+        quick ? {type: 'quick-hash', ranges: C.quickHashRanges(file.size)} : {});
+      return {file, digest, quick};
+    }, controller, (fullHash ? 'Verifying ' : 'Fingerprinting ') + entry.relativePath);
   }
   async function runJournalScan(rootHandle, scan, scanConfig, onEntry, controller) {
     const journal = await C.scanJournal(db, scan.id, scan.rootId);
@@ -4071,13 +4092,14 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           file=await scanRetry(()=>boundedScanRead(entry.getFile(),lane,'Opening media file'),lane,'Opening '+entry.relativePath);
           if(!Number.isSafeInteger(file.size)||file.size<=0)throw new Error('Empty or invalid media file.');
           if(C.shouldSkipAge(file.lastModified,scanConfig)||(completed&&savedSignature===(entry.archiveSignature||[file.size,file.lastModified].join(':'))))return {file,controller:lane};
-          phase='hash';const quick=C.shouldUseQuickHash(C.extensionOf(file.name),file.size,scanConfig);
-          digest=await scanRetry(()=>hashFile(lane,file,C.cryptoRandom(),progress=>{
+          phase='hash';const fingerprint=await fingerprintScanEntry(entry,file,lane,scanConfig,progress=>{
             if(controller.activeLane!==lane)return;
             setScanStatus('Fingerprinting in parallel:',entry.relativePath);
             const fraction=progress.total?progress.done/progress.total:0;
             $('#scan-progress').style.width=(candidates?(scan.hashed+scan.resumeSkipped+fraction)/Math.max(1,candidates.length)*100:fraction*100)+'%';
-          },quick?{type:'quick-hash',ranges:C.quickHashRanges(file.size)}:{}),lane,'Fingerprinting '+entry.relativePath);
+          });
+          file=fingerprint.file;digest=fingerprint.digest;
+          if(C.shouldSkipAge(file.lastModified,scanConfig))return {file,controller:lane};
           const extension=C.extensionOf(file.name);
           if(C.PREVIEW_EXTENSIONS.includes(extension)&&!C.VIDEO_EXTENSIONS.includes(extension)&&!C.RAW_EXTENSIONS.includes(extension)&&!['tif','tiff','heic','heif'].includes(extension)) {
             try {const result=await scanImagePreview(file,lane);generated={...result,mime:result.blob.type,bytes:new Uint8Array(await result.blob.arrayBuffer())};}
@@ -4140,13 +4162,13 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         catch (error) {
           if (controller.cancelled) return;
           recordScanError(scan, {
-            path: rel, message: String(error.message || error)
+            path: rel, message: scanErrorMessage(error)
           }
           );
           return;
         }
-        const signature = entry.archiveSignature || [file.size, file.lastModified].join(':'),
-          checkpoint = await checkpoints[rel],savedOccurrence = checkpoint?.occurrenceId && (await
+        let signature = entry.archiveSignature || [file.size, file.lastModified].join(':');
+        const checkpoint = await checkpoints[rel],savedOccurrence = checkpoint?.occurrenceId && (await
           ws.occurrences[checkpoint.occurrenceId]);
         if (resumeScan && checkpoint?.state === 'complete' &&
         checkpoint.signature === signature && savedOccurrence) {
@@ -4186,19 +4208,24 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         };
 
         await setDirty();
-        const ext = C.extensionOf(file.name);let useQuick = C.shouldUseQuickHash(ext, file.size,
-          scanConfig),ranges = useQuick ? C.quickHashRanges(file.size) : null;
+        let ext = C.extensionOf(file.name),useQuick = C.shouldUseQuickHash(ext, file.size, scanConfig);
         hashMethod = useQuick ? 'sampled-sha256-v1' : 'sha256';
         setScanStatus(`${useQuick ? 'Quick fingerprinting' : 'Hashing'} ${position}:`, rel);
         try {
           if(prepared?.error)throw prepared.error;
-          const digest = prepared?.digest || await scanRetry(() => hashFile(fileController, file, C.cryptoRandom(), (m) => {
+          const fingerprint = prepared?.digest ? {file, digest: prepared.digest, quick: useQuick} :
+          await fingerprintScanEntry(entry, file, fileController, scanConfig, (m) => {
             const fileProgress = m.total ? m.done / m.total : 0,overall = total ?
               (index + fileProgress) / total : fileProgress;
             $('#scan-progress').style.width = `${overall * 100}%`;
-          }, useQuick ? {
-            type: 'quick-hash', ranges
-          } : {}),controller,'Fingerprinting ' + rel);
+          });
+          file = fingerprint.file;
+          if (C.shouldSkipAge(file.lastModified, scanConfig)) {scan.ageSkipped = (scan.ageSkipped || 0) + 1;delete checkpoints[rel];await setDirty();return;}
+          ext = C.extensionOf(file.name);useQuick = fingerprint.quick;
+          hashMethod = useQuick ? 'sampled-sha256-v1' : 'sha256';
+          signature = entry.archiveSignature || [file.size, file.lastModified].join(':');
+          (await checkpoints[rel]).signature = signature;
+          const digest = fingerprint.digest;
           sampleDigest = useQuick ? digest : null;
           hash = useQuick ? C.quickHashIdentity(digest, rel) : digest;
           if(prepared?.digest)$('#scan-progress').style.width=(total?(index+1)/Math.max(1,total)*100:100)+'%';
@@ -4206,11 +4233,11 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         catch (error) {
           if (controller.cancelled) return;
           recordScanError(scan, {
-            path: rel, message: String(error.message || error)
+            path: rel, message: scanErrorMessage(error)
           }
           );
           (await checkpoints[rel]).state = 'failed';
-          (await checkpoints[rel]).error = String(error.message || error);
+          (await checkpoints[rel]).error = scanErrorMessage(error);
           await setDirty();
           return;
         }
@@ -4221,11 +4248,12 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           if (manifest && (await ws.decisions[protectedKey])) candidates.push({ digest: manifest[0], decision: await ws.decisions[protectedKey] });
           if (candidates.length) {
             try {
-              const full = await scanRetry(() => hashFile(fileController, file, C.cryptoRandom(), () => {}),controller,'Verifying ' + rel);
+              const verified = await fingerprintScanEntry(entry, file, fileController, scanConfig, () => {}, true);
+              file = verified.file;const full = verified.digest;
               const match = candidates.find((item) => item.digest === full);
               if (match) {hash = match.decision.hash;hashMethod = 'sha256';useQuick = false;}
             } catch (error) {
-              if (controller.cancelled) return;(await checkpoints[rel]).state = 'failed';(await checkpoints[rel]).error = String(error.message || error);
+              if (controller.cancelled) return;(await checkpoints[rel]).state = 'failed';(await checkpoints[rel]).error = scanErrorMessage(error);
               recordScanError(scan, { path: rel, message: (await checkpoints[rel]).error });await setDirty();return;
             }
           }
@@ -4250,7 +4278,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
             } else
             if (!previousContent.sampleDigest || sampleMatches) {
               try {
-                const full = await scanRetry(()=>hashFile(fileController, file, C.cryptoRandom(), () => {}),controller,'Verifying '+rel);
+                const verified = await fingerprintScanEntry(entry, file, fileController, scanConfig, () => {}, true);
+                file = verified.file;const full = verified.digest;
                 if (full === previousFullSha256) {
                   previousContent.sampleDigest = sampleDigest;
                   previousContent.fullSha256 = previousFullSha256;
@@ -4261,8 +4290,9 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
               }
               catch (error) {
                 if (controller.cancelled) return;
-                recordScanError(scan, { path: rel, message: String(error?.message || error) });
+                recordScanError(scan, { path: rel, message: scanErrorMessage(error) });
                 (await checkpoints[rel]).state = 'failed';
+                (await checkpoints[rel]).error = scanErrorMessage(error);
                 await setDirty();
                 return;
               }

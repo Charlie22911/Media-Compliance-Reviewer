@@ -2397,11 +2397,11 @@ destination according to your evidence-handling requirements. Stored Evidence re
 files in folders you select.</p>
 <dl class="about-details">
 <dt>Version</dt>
-<dd>3.3.6</dd>
+<dd>3.3.7</dd>
 <dt>Authored by</dt>
 <dd>IT1 McPherson, Charlie</dd>
 <dt>Release date</dt>
-<dd>October 8, 2026</dd>
+<dd>October 10, 2026</dd>
 <dt>Developed in cooperation with</dt>
 <dd>NAVAIR Prometheus Group</dd>
 </dl>
@@ -2410,7 +2410,8 @@ user. Processing stays on the local computer unless the selected folder or datab
 <button id="decoder-license-button" class="small">Decoder license</button>
 <button id="database-license-button" class="small">Database license</button>
 <h3>Change log</h3>
-<details class="change-entry" open><summary>Version 3.3.6 · October 8, 2026</summary><ul><li>Show Creating database after the destination picker closes, covering preparation and the first save.</li><li>Return to the chooser if creation fails.</li><li>Show save activity before checking the destination and updating local recovery data.</li></ul></details>
+<details class="change-entry" open><summary>Version 3.3.7 · October 10, 2026</summary><ul><li>Reopen source files during fingerprint retries and recalculate sample ranges from the refreshed file.</li><li>Keep successful fingerprints with matching metadata, previews, and resume checkpoints. Reject changed files during full-hash verification.</li><li>Preserve browser read-error types in Log and saved scan errors, with the existing three-retry limit and cancellation behavior.</li><li>Update Help with fingerprint retry guidance.</li></ul></details>
+<details class="change-entry"><summary>Version 3.3.6 · October 8, 2026</summary><ul><li>Show Creating database after the destination picker closes, covering preparation and the first save.</li><li>Return to the chooser if creation fails.</li><li>Show save activity before checking the destination and updating local recovery data.</li></ul></details>
 <details class="change-entry"><summary>Version 3.3.5 · October 8, 2026</summary><ul><li>Show an early startup screen in both editions with the current loading, storage, or recovery step.</li><li>Keep database operations unavailable until startup finishes and the database chooser is ready.</li><li>Show a startup error and Reload tool button if initialization fails.</li><li>Update Help with startup guidance.</li></ul></details>
 <details class="change-entry"><summary>Version 3.3.4 · October 8, 2026</summary><ul><li>Keep database controls disabled with visible startup progress until storage is ready.</li><li>Prevent overlapping database-opening actions and keep the active database open until its replacement is validated.</li><li>Report the original worker failure and reject expired handles instead of repeating undefined transaction errors.</li><li>Check delayed startup, failed replacement, and reopening after a worker failure in both editions.</li></ul></details>
 <details class="change-entry"><summary>Version 3.3.3 · October 8, 2026</summary><ul><li>Read saved scan settings and folder progress from the correct database column, preventing scans from stopping with no such column: value.</li><li>Defer path fitting until after resize notifications and avoid rewriting unchanged labels, preventing resize-loop errors during scanning.</li><li>Keep review history linked to migrated fingerprints and repair older dangling links while preserving protected Evidence identities.</li><li>Expand database, application control, and browser workflow checks for both editions.</li></ul></details>
@@ -2656,6 +2657,7 @@ user. Processing stays on the local computer unless the selected folder or datab
 <h3>When an operation does not finish</h3>
 <p>If Log reports <strong>Database worker stopped</strong>, it includes the original failure. Reopen your saved SQLite file, or reload this HTML and choose <strong>Recover browser database</strong> to recover locally committed progress. Unconfirmed writes are not replayed automatically.</p>
 <p>Recoverable folder reads, file reads, fingerprinting, and database operations get an initial attempt and up to three retries with short pauses. Open <strong>Log</strong> to see retry attempts and any final failure. If listing a folder fails, it is reopened; completed files are skipped. You can still cancel while a retry is waiting.</p>
+<p>During fingerprint retries, the tool reopens files through the selected folder and uses their current metadata and sample ranges. <strong>Scan recovery: Fingerprinting</strong> means a file read is being retried; your scan keeps its progress. Log includes the browser's error type, such as <strong>NotReadableError</strong>. Failed or incomplete fingerprints are not added to media results. If a file remains unreadable, check that you can open it from the source folder, then resume the scan. The alternate browser folder picker cannot reopen a changed file; select the folder again if needed.</p>
 <p>Cancellation and permanent problems, such as invalid data or exhausted storage, need a different action. Database writes are retried only when their outcome is safe to confirm. If the database worker fails and a write cannot be confirmed, reopen your last saved database before continuing. Retry does not replace keeping regular saved copies.</p>
 <p>Open <strong>Log</strong> at the top to see errors and the reason a scan ended. A scan with read errors can be resumed to retry failed items; completed records stay in the database. Preview errors affect the saved preview and do not discard a completed fingerprint. If moving selected items fails, the selection stays available so you can retry. Use <strong>Save log as text</strong> to keep details for troubleshooting.</p>
 <p>Click a thumbnail or its checkbox to select it, then choose a selected-item action such as <strong>Compliant</strong>. The bucket tabs switch the displayed results. Clicks on another selection are queued while a review action saves; repeated clicks on the same pending items are ignored. Page refills do not hold up the next review write. A loading box appears while replacement cards fill the page. <strong>Fit</strong> shows the entire thumbnail; <strong>Fill</strong> fills the frame and crops evenly around the center.</p>
@@ -4186,7 +4188,7 @@ Library.
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.6', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.7', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -4214,7 +4216,7 @@ Library.
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.3.6', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.3.7', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -5203,7 +5205,7 @@ self.onmessage=async e=>{
   }
   catch(error){
     self.postMessage({
-      type:jobs.get(m.jobId)?'cancelled':'error',jobId:m.jobId,message:String(error.message||
+      type:jobs.get(m.jobId)?'cancelled':'error',jobId:m.jobId,name:error.name||'Error',message:String(error.message||
       error)
     }
     )
@@ -5214,6 +5216,8 @@ self.onmessage=async e=>{
 }
 ;
 </script>
+
+
 
 
 
@@ -10295,7 +10299,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
             await finish(reject, new Error('Incomplete or invalid hash result.'));return;
           }
           await finish(resolve, m.hash);
-        } else if (m.type === 'error' || m.type === 'cancelled') await finish(reject, new Error(m.message || m.type));
+        } else if (m.type === 'error' || m.type === 'cancelled') await finish(reject,
+          Object.assign(new Error(m.message || m.type), {name: m.type === 'cancelled' ? 'AbortError' : m.name || 'Error'}));
       };
       controller.cancelCurrent = async () => await finish(reject, new DOMException('Scan cancelled', 'AbortError'));
       worker.addEventListener('message', handler);worker.addEventListener('error', failure);worker.addEventListener('messageerror', failure);
@@ -10534,11 +10539,31 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       Promise.resolve(promise).then(async (value) => await finish(null, value), async (error) => await finish(error));
     });
   }
+  function scanErrorMessage(error) {
+    const message = String(error?.message || error);
+    return error?.name && error.name !== 'Error' ? error.name + ': ' + message : message;
+  }
   async function scanRetry(operation, controller, label) {
     try {return await C.retryOperation(operation,{controller,onRetry:(error,attempt)=>{
-      logActivity('warning','Retrying scan operation (' + attempt + ' of 3)',label + ': ' + String(error.message || error));
+      logActivity('warning','Retrying scan operation (' + attempt + ' of 3)',label + ': ' + scanErrorMessage(error));
       showOperation('Scan recovery',label + ' — retry ' + attempt + ' of 3');
     }});} finally {finishOperation('Scan recovery');}
+  }
+  async function fingerprintScanEntry(entry, file, controller, scanConfig, onProgress, fullHash = false) {
+    const size = file.size, lastModified = file.lastModified;
+    return scanRetry(async attempt => {
+      // A File is a snapshot. Reusing it after a read failure cannot recover a
+      // stale snapshot; reopen through the entry without nesting retry loops.
+      if (attempt) file = await boundedScanRead(entry.getFile(), controller, 'Reopening media file');
+      if (!Number.isSafeInteger(file.size) || file.size <= 0) throw new Error('Empty or invalid media file.');
+      // Full verification must still describe the earlier successful sample.
+      if (fullHash && (file.size !== size || file.lastModified !== lastModified))
+        throw new Error('Source changed during scan; the earlier fingerprint is invalid.');
+      const quick = !fullHash && C.shouldUseQuickHash(C.extensionOf(file.name), file.size, scanConfig);
+      const digest = await hashFile(controller, file, C.cryptoRandom(), onProgress,
+        quick ? {type: 'quick-hash', ranges: C.quickHashRanges(file.size)} : {});
+      return {file, digest, quick};
+    }, controller, (fullHash ? 'Verifying ' : 'Fingerprinting ') + entry.relativePath);
   }
   async function runJournalScan(rootHandle, scan, scanConfig, onEntry, controller) {
     const journal = await C.scanJournal(db, scan.id, scan.rootId);
@@ -10920,13 +10945,14 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           file=await scanRetry(()=>boundedScanRead(entry.getFile(),lane,'Opening media file'),lane,'Opening '+entry.relativePath);
           if(!Number.isSafeInteger(file.size)||file.size<=0)throw new Error('Empty or invalid media file.');
           if(C.shouldSkipAge(file.lastModified,scanConfig)||(completed&&savedSignature===(entry.archiveSignature||[file.size,file.lastModified].join(':'))))return {file,controller:lane};
-          phase='hash';const quick=C.shouldUseQuickHash(C.extensionOf(file.name),file.size,scanConfig);
-          digest=await scanRetry(()=>hashFile(lane,file,C.cryptoRandom(),progress=>{
+          phase='hash';const fingerprint=await fingerprintScanEntry(entry,file,lane,scanConfig,progress=>{
             if(controller.activeLane!==lane)return;
             setScanStatus('Fingerprinting in parallel:',entry.relativePath);
             const fraction=progress.total?progress.done/progress.total:0;
             $('#scan-progress').style.width=(candidates?(scan.hashed+scan.resumeSkipped+fraction)/Math.max(1,candidates.length)*100:fraction*100)+'%';
-          },quick?{type:'quick-hash',ranges:C.quickHashRanges(file.size)}:{}),lane,'Fingerprinting '+entry.relativePath);
+          });
+          file=fingerprint.file;digest=fingerprint.digest;
+          if(C.shouldSkipAge(file.lastModified,scanConfig))return {file,controller:lane};
           const extension=C.extensionOf(file.name);
           if(C.PREVIEW_EXTENSIONS.includes(extension)&&!C.VIDEO_EXTENSIONS.includes(extension)&&!C.RAW_EXTENSIONS.includes(extension)&&!['tif','tiff','heic','heif'].includes(extension)) {
             try {const result=await scanImagePreview(file,lane);generated={...result,mime:result.blob.type,bytes:new Uint8Array(await result.blob.arrayBuffer())};}
@@ -10989,13 +11015,13 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         catch (error) {
           if (controller.cancelled) return;
           recordScanError(scan, {
-            path: rel, message: String(error.message || error)
+            path: rel, message: scanErrorMessage(error)
           }
           );
           return;
         }
-        const signature = entry.archiveSignature || [file.size, file.lastModified].join(':'),
-          checkpoint = await checkpoints[rel],savedOccurrence = checkpoint?.occurrenceId && (await
+        let signature = entry.archiveSignature || [file.size, file.lastModified].join(':');
+        const checkpoint = await checkpoints[rel],savedOccurrence = checkpoint?.occurrenceId && (await
           ws.occurrences[checkpoint.occurrenceId]);
         if (resumeScan && checkpoint?.state === 'complete' &&
         checkpoint.signature === signature && savedOccurrence) {
@@ -11035,19 +11061,24 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         };
 
         await setDirty();
-        const ext = C.extensionOf(file.name);let useQuick = C.shouldUseQuickHash(ext, file.size,
-          scanConfig),ranges = useQuick ? C.quickHashRanges(file.size) : null;
+        let ext = C.extensionOf(file.name),useQuick = C.shouldUseQuickHash(ext, file.size, scanConfig);
         hashMethod = useQuick ? 'sampled-sha256-v1' : 'sha256';
         setScanStatus(`${useQuick ? 'Quick fingerprinting' : 'Hashing'} ${position}:`, rel);
         try {
           if(prepared?.error)throw prepared.error;
-          const digest = prepared?.digest || await scanRetry(() => hashFile(fileController, file, C.cryptoRandom(), (m) => {
+          const fingerprint = prepared?.digest ? {file, digest: prepared.digest, quick: useQuick} :
+          await fingerprintScanEntry(entry, file, fileController, scanConfig, (m) => {
             const fileProgress = m.total ? m.done / m.total : 0,overall = total ?
               (index + fileProgress) / total : fileProgress;
             $('#scan-progress').style.width = `${overall * 100}%`;
-          }, useQuick ? {
-            type: 'quick-hash', ranges
-          } : {}),controller,'Fingerprinting ' + rel);
+          });
+          file = fingerprint.file;
+          if (C.shouldSkipAge(file.lastModified, scanConfig)) {scan.ageSkipped = (scan.ageSkipped || 0) + 1;delete checkpoints[rel];await setDirty();return;}
+          ext = C.extensionOf(file.name);useQuick = fingerprint.quick;
+          hashMethod = useQuick ? 'sampled-sha256-v1' : 'sha256';
+          signature = entry.archiveSignature || [file.size, file.lastModified].join(':');
+          (await checkpoints[rel]).signature = signature;
+          const digest = fingerprint.digest;
           sampleDigest = useQuick ? digest : null;
           hash = useQuick ? C.quickHashIdentity(digest, rel) : digest;
           if(prepared?.digest)$('#scan-progress').style.width=(total?(index+1)/Math.max(1,total)*100:100)+'%';
@@ -11055,11 +11086,11 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
         catch (error) {
           if (controller.cancelled) return;
           recordScanError(scan, {
-            path: rel, message: String(error.message || error)
+            path: rel, message: scanErrorMessage(error)
           }
           );
           (await checkpoints[rel]).state = 'failed';
-          (await checkpoints[rel]).error = String(error.message || error);
+          (await checkpoints[rel]).error = scanErrorMessage(error);
           await setDirty();
           return;
         }
@@ -11070,11 +11101,12 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           if (manifest && (await ws.decisions[protectedKey])) candidates.push({ digest: manifest[0], decision: await ws.decisions[protectedKey] });
           if (candidates.length) {
             try {
-              const full = await scanRetry(() => hashFile(fileController, file, C.cryptoRandom(), () => {}),controller,'Verifying ' + rel);
+              const verified = await fingerprintScanEntry(entry, file, fileController, scanConfig, () => {}, true);
+              file = verified.file;const full = verified.digest;
               const match = candidates.find((item) => item.digest === full);
               if (match) {hash = match.decision.hash;hashMethod = 'sha256';useQuick = false;}
             } catch (error) {
-              if (controller.cancelled) return;(await checkpoints[rel]).state = 'failed';(await checkpoints[rel]).error = String(error.message || error);
+              if (controller.cancelled) return;(await checkpoints[rel]).state = 'failed';(await checkpoints[rel]).error = scanErrorMessage(error);
               recordScanError(scan, { path: rel, message: (await checkpoints[rel]).error });await setDirty();return;
             }
           }
@@ -11099,7 +11131,8 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
             } else
             if (!previousContent.sampleDigest || sampleMatches) {
               try {
-                const full = await scanRetry(()=>hashFile(fileController, file, C.cryptoRandom(), () => {}),controller,'Verifying '+rel);
+                const verified = await fingerprintScanEntry(entry, file, fileController, scanConfig, () => {}, true);
+                file = verified.file;const full = verified.digest;
                 if (full === previousFullSha256) {
                   previousContent.sampleDigest = sampleDigest;
                   previousContent.fullSha256 = previousFullSha256;
@@ -11110,8 +11143,9 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
               }
               catch (error) {
                 if (controller.cancelled) return;
-                recordScanError(scan, { path: rel, message: String(error?.message || error) });
+                recordScanError(scan, { path: rel, message: scanErrorMessage(error) });
                 (await checkpoints[rel]).state = 'failed';
+                (await checkpoints[rel]).error = scanErrorMessage(error);
                 await setDirty();
                 return;
               }
