@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.3.10 — October 10, 2026
+
+- Report actual SQL execution and completed storage calls during long database requests, keeping active Forge requests from hitting the inactivity deadline. Show lengthy database activity in the fixed Activity panel.
+- Stop a genuinely stalled Forge database worker, reject its queued requests together, and include the request and last active operation in the failure message. Require reopening or recovery before further work.
+- Add an index for active file locations to reduce record reads when counting and filtering results. Existing databases receive the index when opened.
+- Skip verified Windows recycle-bin metadata files before fingerprinting or creating previews, while continuing to scan actual recycled media. Preserve the browser error type in final folder-listing errors.
+- Update Help with database activity, recovery, and recycle-bin guidance.
+
 ## 3.3.9 — October 10, 2026
 
 - Keep the selected-item action bar at the top while scrolling through results, below the app header on desktop. Scan status, bucket totals, and search/thumbnail controls scroll away normally.

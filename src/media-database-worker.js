@@ -3,10 +3,11 @@ import * as SQLite from '../vendor/wa-sqlite/src/sqlite-api.js';
 import {IDBBatchAtomicVFS} from '../vendor/wa-sqlite/src/examples/IDBBatchAtomicVFS.js';
 
 const STORAGE='photo-audit-sqlite-pages-v1',CHUNK=1024*1024;
-let engine,sqlite,vfs,storage,activeRequestId=null,lastProgressAt=0;
+let engine,sqlite,vfs,storage,activeRequestId=null,lastProgressAt=0,lastActivityAt=0,activePhase='',activeStartedAt=0;
 const requests=[],backups=new Map(),DEFERRED=Symbol('incremental snapshot');
 let pumping=false;
-function progress(phase,done=0,total=0,force=false){const now=Date.now();if(!force){if(now-lastProgressAt<250)return;lastProgressAt=now;}self.postMessage({requestId:activeRequestId,progress:{phase,done,total}});}
+function progress(phase,done=0,total=0,force=false,active=false){const now=Date.now();if(!force&&now-(active?lastActivityAt:lastProgressAt)<250)return;if(active)lastActivityAt=now;else lastProgressAt=now;self.postMessage({requestId:activeRequestId,progress:{phase,done,total,...active?{active:true,elapsedMs:Math.max(0,now-activeStartedAt)}:{}}});}
+function databaseActivity(){if(activePhase)progress(activePhase,0,0,false,true);}
 const sessionId=crypto.randomUUID(),sessionLock='photo-audit-database-session:'+sessionId;
 let releaseSession;
 const databases=new Map(),snapshots=new Map(),cursors=new Map();
@@ -18,7 +19,11 @@ async function boot(){
  progress('Loading SQLite runtime',0,0,true);
  engine=await SQLiteFactory({wasmBinary:Uint8Array.from(atob(globalThis.MEDIA_SQLITE_WASM),c=>c.charCodeAt(0))});
  progress('Opening browser storage',0,0,true);
- sqlite=SQLite.Factory(engine);vfs=await IDBBatchAtomicVFS.create('media-idb',engine,{idbName:STORAGE,lockPolicy:'exclusive',lockTimeout:10000});sqlite.vfs_register(vfs,true);
+ sqlite=SQLite.Factory(engine);vfs=await IDBBatchAtomicVFS.create('media-idb',engine,{idbName:STORAGE,lockPolicy:'exclusive',lockTimeout:10000});
+ // Completed storage calls and executed SQL instructions are real activity.
+ // A timer alone would keep a stalled request alive indefinitely.
+ for(const method of ['jRead','jSync','jLock','jUnlock']){const operation=vfs[method].bind(vfs);vfs[method]=async(...args)=>{const result=await operation(...args);databaseActivity();return result;};}
+ sqlite.vfs_register(vfs,true);
  storage=await request(indexedDB.open(STORAGE));
  await new Promise((resolve,reject)=>{navigator.locks.request(sessionLock,async()=>{resolve();await new Promise(done=>releaseSession=done);}).catch(reject);});
  progress('Cleaning temporary database files',0,0,true);
@@ -94,7 +99,7 @@ async function readFile(path,start,end){
  return data;
 }
 class Database {
- constructor(id,path,pointer){this.id=id;this.path=path;this.pointer=pointer;this.cache=new Map();this.pending=[];}
+ constructor(id,path,pointer){this.id=id;this.path=path;this.pointer=pointer;this.cache=new Map();this.pending=[];sqlite.progress_handler(pointer,10000,()=>{databaseActivity();return 0;});}
  enqueue(sql,params=[]){this.pending.push({sql,params});}
  async flush(){if(this.pending.length)await this.exec('SELECT 1');}
  async clear(){for(const stmt of this.cache.values())await sqlite.finalize(stmt);this.cache.clear();}
@@ -224,7 +229,7 @@ async function finishBackup(backup,error=null){
  progress('Preparing snapshot',size,size,true);self.postMessage({requestId:backup.requestId,result:{token,size}});
 }
 async function stepBackup(backup){
- activeRequestId=backup.requestId;
+ activeRequestId=backup.requestId;activePhase='Preparing snapshot';activeStartedAt=Date.now();
  try{
   // Asyncify permits one SQLite call at a time. Source transactions and review
   // writes run between these bounded steps, never during a suspended WASM call.
@@ -246,16 +251,17 @@ async function pump(){
   for(;;){
    const backup=[...backups.values()].find(value=>!value.source.transaction&&(!value.retryAt||value.retryAt<=Date.now()));
    if(requests.length&&(!backup||foreground<4)){
-    const {requestId,method,args}=requests.shift();activeRequestId=requestId;foreground++;
+    const {requestId,method,args}=requests.shift();activeRequestId=requestId;activePhase='Running '+method;activeStartedAt=Date.now();foreground++;
     try{progress(method,0,0,true);if(!Object.hasOwn(actions,method))throw new Error('Unknown database request.');const result=await actions[method](args||{});if(result!==DEFERRED){progress(method,1,1,true);self.postMessage({requestId,result});}}
     catch(error){replyError(requestId,error);}
    }else if(backup){foreground=0;await stepBackup(backup);}
    else break;
+   activePhase='';
    // Give incoming review and scan requests a chance to reach the queue.
    await new Promise(resolve=>setTimeout(resolve,0));
   }
  }finally{
-  pumping=false;
+  activePhase='';pumping=false;
   const retryAt=Math.min(...[...backups.values()].filter(value=>!value.source.transaction&&value.retryAt).map(value=>value.retryAt));
   if(Number.isFinite(retryAt))setTimeout(()=>pump(),Math.max(0,retryAt-Date.now()));
  }

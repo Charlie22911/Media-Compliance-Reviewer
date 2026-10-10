@@ -149,6 +149,22 @@
     const parts = pathParts(path);
     return parts.length >= 2 && parts[1].toLowerCase() === 'application data';
   }
+  async function isRecycleBinMetadata(file, path) {
+    const parts = pathParts(path);
+    if (!parts.slice(0,-1).some(part => part.toLowerCase() === '$recycle.bin') ||
+        !/^\$I[a-z0-9]{6}(?:\..*)?$/i.test(parts.at(-1) || '') || file.size < 28 || file.size > 65564) return false;
+    const bytes = new Uint8Array(await file.slice(0,65564).arrayBuffer()),view = new DataView(bytes.buffer);
+    const version = view.getBigUint64(0,true);
+    if (version !== 1n && version !== 2n) return false;
+    const start = version === 1n ? 24 : 28;
+    if ((bytes.length-start)%2) return false;
+    if (version === 2n) {
+      const count = view.getUint32(24,true);
+      if (!count || count > 32768 || start+count*2 !== bytes.length || view.getUint16(bytes.length-2,true)) return false;
+    }
+    const original = new TextDecoder('utf-16le').decode(bytes.subarray(start)),end = original.indexOf('\0');
+    return end > 0 && /^(?:[a-z]:\\|\\\\)/i.test(original.slice(0,end));
+  }
   function fitPathSuffix(path, maxWidth, measure) {
     const full = String(path || ''),width = Math.max(0, Number(maxWidth) || 0);
     if (!full || measure(full) <= width) return full;
@@ -922,7 +938,7 @@
   function newWorkspace(reviewer = '') {
     const now = new Date().toISOString();
     return {
-      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.9', id: cryptoRandom(), createdAt: now,
+      schemaVersion: 1, databaseSchemaVersion: 4, appVersion: '3.3.10', id: cryptoRandom(), createdAt: now,
       updatedAt: now, reviewer, roots: {
       },
       scans: {
@@ -950,7 +966,7 @@
   }
   function serializeWorkspace(ws) {
     return {
-      ...ws, appVersion: '3.3.9', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
+      ...ws, appVersion: '3.3.10', catalogNormalized: Boolean(ws.catalogNormalized), preferences: {
         ...ws.preferences, scanExtensions: [...ws.preferences.scanExtensions],
         visibleExtensions: [...ws.preferences.visibleExtensions]
       }
@@ -1146,6 +1162,8 @@
       await database.run('CREATE INDEX IF NOT EXISTS catalog_found_order ON catalog_records(kind,status);');
       // Find the first path within a hash group without scanning the whole root for each result.
       await database.run("CREATE INDEX IF NOT EXISTS catalog_occurrence_group_path ON catalog_records(root_id,hash,path) WHERE kind='occurrences';");
+      // Cover active-group counts and extension checks without reading each JSON record.
+      await database.run("CREATE INDEX IF NOT EXISTS catalog_active_occurrence_group ON catalog_records(root_id,hash,extension) WHERE kind='occurrences' AND COALESCE(json_extract(row_json,'$.supersededAt'),'')='';");
       await database.run('CREATE INDEX IF NOT EXISTS preview_access_lru ON preview_access(used_at,hash);');
       await database.run('CREATE TABLE IF NOT EXISTS scan_checkpoints(scan_id TEXT NOT NULL,path TEXT NOT NULL,occurrence_id TEXT,row_json TEXT NOT NULL,PRIMARY KEY(scan_id,path)); CREATE INDEX IF NOT EXISTS scan_checkpoint_occurrence ON scan_checkpoints(occurrence_id);');
       if (version < 4) {
@@ -1255,7 +1273,7 @@
     isContentVisible,
     rangeKeys, fileUrlFromPath, latestScanExtensions, normalizeSourceRoot, rootKindFromName,
     normalizeScanMode, normalizeWorkerCount, createScanConfig, shouldUseQuickHash, quickHashRanges,
-    quickHashIdentity, shouldSkipAge, homeShareUser, shouldSkipPathForScan, fitPathSuffix,
+    quickHashIdentity, shouldSkipAge, homeShareUser, shouldSkipPathForScan, isRecycleBinMetadata, fitPathSuffix,
     resumeFileMatches, latestIncompleteScan, abandonIncompleteScans, compareOccurrences,
     resolveRelativeFile, retryOperation, retryableError, retryDelay, zipCrc32, workspaceFileVersionsMatch, diffRowSnapshots,
     readZipDirectory,

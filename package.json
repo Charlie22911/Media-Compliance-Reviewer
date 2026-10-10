@@ -1,6 +1,6 @@
 {
   "name": "media-compliance-reviewer",
-  "version": "3.3.9",
+  "version": "3.3.10",
   "private": true,
   "scripts": {
     "build": "node scripts/build-media-database.cjs && node scripts/assemble-media-reviewer.cjs && node scripts/pack-media-reviewer.cjs",
@@ -11,11 +11,12 @@
     "test:identity": "node scripts/test-identity-audit.cjs",
     "test:results": "node scripts/test-live-results.cjs",
     "test:display": "node scripts/test-display-resize.cjs",
-    "test:startup": "node scripts/test-database-startup.cjs && node scripts/test-worker-lifecycle.cjs",
+    "test:startup": "node scripts/test-database-startup.cjs && node scripts/test-worker-lifecycle.cjs && node scripts/test-database-watchdog.cjs",
     "test:browser": "node scripts/test-browser-smoke.cjs --scan",
     "test:review": "node scripts/test-review-actions.cjs",
     "test:recovery": "node scripts/test-scan-recovery.cjs",
     "test:fingerprint": "node scripts/test-fingerprint-recovery.cjs",
+    "test:metadata": "node scripts/test-recycle-metadata.cjs",
     "test:inspector": "node scripts/test-inspector-loading.cjs",
     "test:responsive": "node scripts/test-responsive-database.cjs && node scripts/test-incremental-snapshot.cjs && node scripts/test-forge-folder-pages.cjs"
   },

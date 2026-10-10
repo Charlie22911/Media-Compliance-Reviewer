@@ -1,10 +1,15 @@
 // First-party Forge transport. The timeout measures inactivity, not copy duration.
 function installMediaDatabaseBridge(token) {
- const pending=new Map(),deadline=120000;
+ const pending=new Map(),deadline=120000;let failure=null,lastPhase='waiting for the worker';
  const send=(id,method,args)=>parent.postMessage({__mediaDatabaseRequest:true,token,id,method,args},'*');
  const settle=(id,error,result)=>{const slot=pending.get(id);if(!slot)return;pending.delete(id);clearTimeout(slot.timer);error?slot.reject(error):slot.resolve(result);};
- const arm=(id,slot)=>{clearTimeout(slot.timer);slot.timer=setTimeout(()=>settle(id,new Error('Database communication stopped for two minutes; operation outcome is unknown. Reopen the saved database before continuing.')),deadline);};
+ const arm=(id,slot)=>{clearTimeout(slot.timer);slot.timer=setTimeout(()=>{
+  failure=new Error('Database worker stopped: No database progress for two minutes during '+slot.method+'. Last active operation: '+lastPhase+'. A write may be unconfirmed. Reopen the saved database or reload and recover the browser copy before continuing.');
+  parent.postMessage({__mediaDatabaseAbort:true,token,reason:failure.message},'*');
+  for(const requestId of [...pending.keys()])settle(requestId,failure);
+ },deadline);};
  window.__MediaDatabaseRPC=(method,args)=>{
+  if(failure){if(method==='open'||method==='recoveryGet'){failure=null;lastPhase='waiting for the worker';}else return Promise.reject(failure);}
   if(pending.size>=36)return Promise.reject(new Error('Database request queue is full. Retry when the current operation finishes.'));
   return new Promise((resolve,reject)=>{const id=crypto.randomUUID(),slot={resolve,reject,method,timer:null};pending.set(id,slot);arm(id,slot);try{send(id,method,args);}catch(error){settle(id,error);}});
  };
@@ -12,7 +17,7 @@ function installMediaDatabaseBridge(token) {
   const message=event.data;
   if(event.source!==parent||!message||message.token!==token||!message.__mediaDatabaseResponse)return;
   const slot=pending.get(message.id);
-  if(message.progress){if(slot){arm(message.id,slot);window.dispatchEvent(new CustomEvent('media-database-progress',{detail:message.progress}));}return;}
+  if(message.progress){if(slot){lastPhase=message.progress.phase||lastPhase;arm(message.id,slot);window.dispatchEvent(new CustomEvent('media-database-progress',{detail:message.progress}));}return;}
   if(!slot){
    // A late snapshot response still owns disk space. Never retry it anonymously.
    if(message.snapshot&&message.result?.token)window.__MediaDatabaseRPC('release',{token:message.result.token}).catch(()=>{});
@@ -26,7 +31,9 @@ function installMediaDatabaseHostBridge(token,call,getFrame) {
  const running=new Set();
  window.addEventListener('message',async event=>{
   const message=event.data,target=getFrame()?.contentWindow;
-  if(!target||event.source!==target||!message?.__mediaDatabaseRequest||message.token!==token||typeof message.id!=='string')return;
+  if(!target||event.source!==target||message?.token!==token)return;
+  if(message.__mediaDatabaseAbort){call.abort?.(String(message.reason||'Database communication stopped.'));return;}
+  if(!message.__mediaDatabaseRequest||typeof message.id!=='string')return;
   if(running.has(message.id))return; // A transport retry must not replay a mutation.
   const respond=body=>target.postMessage({__mediaDatabaseResponse:true,token,id:message.id,...body},'*');
   if(running.size>=36){respond({error:'Database request queue is full. Retry when the current operation finishes.',retrySafe:true});return;}

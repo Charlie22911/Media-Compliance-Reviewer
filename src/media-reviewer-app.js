@@ -95,7 +95,9 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       const phases={'Loading SQLite runtime':'runtime','Opening browser storage':'storage','Cleaning temporary database files':'cleanup'};
       if (Object.hasOwn(phases,progress.phase)) window.MediaStartup?.update(phases[progress.phase]);
     }
-    if(progress.phase === 'Preparing snapshot' && !progress.queued)showOperation('Saving database',progress.phase,progress.done,progress.total);
+    if(progress.phase === 'Preparing snapshot' && !progress.queued && !progress.active)showOperation('Saving database',progress.phase,progress.done,progress.total);
+    if (!progress.queued && progress.active && progress.elapsedMs >= 2000) showOperation('Database activity',progress.phase + ' · ' + Math.floor(progress.elapsedMs/1000) + 's');
+    else if (!progress.queued && !progress.active && operationStates.has('Database activity')) finishOperation('Database activity');
   });
   window.addEventListener('media-source-cleanup-error', event => {logActivity('warning','A temporary source handle could not be released after retries',event.detail.message);});
   window.addEventListener('error', event => {if (event.message) logActivity('error','Application error',event.error?.stack || event.message);});
@@ -3799,7 +3801,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           directoryRetries.delete(job.path);
           if (result.error && !controller.cancelled) {
             errors.push({ path: job.path, message: 'Folder listing failed after retries: ' + (result.error.name || 'Error') + ': ' + String(result.error.message || result.error) });
-            logActivity('error','Folder could not be listed; saved paths remain queued', (job.path || rootHandle.name) + ': ' + String(result.error.message || result.error));
+            logActivity('error','Folder could not be listed; saved paths remain queued', (job.path || rootHandle.name) + ': ' + scanErrorMessage(result.error));
           }
           finishOperation('Scan recovery');
         }
@@ -4096,6 +4098,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           if(scanConfig.scanArchives&&C.extensionOf(entry.name)==='zip')return {controller:lane};
           file=await scanRetry(()=>boundedScanRead(entry.getFile(),lane,'Opening media file'),lane,'Opening '+entry.relativePath);
           if(!Number.isSafeInteger(file.size)||file.size<=0)throw new Error('Empty or invalid media file.');
+          if(await scanRetry(()=>boundedScanRead(C.isRecycleBinMetadata(file,entry.relativePath),lane,'Checking recycle-bin metadata'),lane,'Checking '+entry.relativePath))return {file,recycleMetadata:true,controller:lane};
           if(C.shouldSkipAge(file.lastModified,scanConfig)||(completed&&savedSignature===(entry.archiveSignature||[file.size,file.lastModified].join(':'))))return {file,controller:lane};
           phase='hash';const fingerprint=await fingerprintScanEntry(entry,file,lane,scanConfig,progress=>{
             if(controller.activeLane!==lane)return;
@@ -4162,6 +4165,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
           file = prepared?.file || await scanRetry(() => boundedScanRead(entry.getFile(), controller, 'Opening media file'),controller,'Opening ' + rel);
           if (controller.cancelled) return;
           if (!Number.isSafeInteger(file.size) || file.size <= 0) throw new Error('Empty or invalid media file.');
+          if (prepared?.recycleMetadata || !prepared && await scanRetry(()=>boundedScanRead(C.isRecycleBinMetadata(file,rel),controller,'Checking recycle-bin metadata'),controller,'Checking '+rel)) {scan.metadataSkipped = (scan.metadataSkipped || 0) + 1;return;}
           if (C.shouldSkipAge(file.lastModified, scanConfig)) {scan.ageSkipped = (scan.ageSkipped || 0) + 1;return;}
         }
         catch (error) {
@@ -6460,6 +6464,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   window.addEventListener('media-database-failure', event => {
     const message = event.detail?.message || 'Database worker stopped. Reopen the database before continuing.';
     logActivity('error','Database worker stopped',message);
+    finishOperation('Database activity');
     showOperation('Database unavailable','Reopen the database or reload and recover the browser copy');
     localSaveError = message;autoSaveError = message;
     if (scanController) scanController.cancelled = true;

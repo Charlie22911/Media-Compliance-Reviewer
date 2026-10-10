@@ -26,10 +26,12 @@ const root=path.join(__dirname,'..');
  };`;
  const resolver={name:'workspace-source',setup(build){build.onResolve({filter:/.*/},args=>args.path.startsWith('node:')?{path:args.path,external:true}:{path:path.resolve(args.resolveDir||root,args.path),namespace:'workspace-source'});build.onLoad({filter:/.*/,namespace:'workspace-source'},args=>({contents:fs.readFileSync(args.path,'utf8'),loader:'js',resolveDir:path.dirname(args.path)}));}};
  const result=await esbuild.build({stdin:{contents:worker+'\n'+probe,resolveDir:path.join(root,'src'),sourcefile:'snapshot-probe.js'},plugins:[resolver],bundle:true,write:false,format:'iife',platform:'node',define:{'import.meta.url':JSON.stringify('file:///snapshot-probe.mjs')},logLevel:'silent'});
- let sequence=0,intervening=null;const waiting=new Map(),order=[];
+ let sequence=0,intervening=null,clock=Date.now();const waiting=new Map(),order=[],activity=[];
  const context={require,process,console,setTimeout,clearTimeout,URL,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,DataView,WebAssembly,atob,crypto:require('crypto').webcrypto,testWasm:fs.readFileSync(path.join(root,'vendor/wa-sqlite/dist/wa-sqlite-async.wasm'))};
+ context.Date=class extends Date{static now(){return clock+=250;}};
  context.self={postMessage(message){
   if(message.progress){
+   if(message.progress.active)activity.push(message);
    if(!intervening&&message.progress.phase==='Preparing snapshot'&&message.progress.done<message.progress.total){
     intervening=(async()=>{await call('begin',{id:'source',token:'review'});await call('query',{id:'source',token:'review',sql:"UPDATE photos SET label='reviewed' WHERE id=1"});await call('commit',{id:'source',token:'review'});order.push('review saved');})();
    }return;
@@ -40,8 +42,11 @@ const root=path.join(__dirname,'..');
  vm.createContext(context);vm.runInContext(result.outputFiles[0].text,context);
  function call(method,args={}){return new Promise((resolve,reject)=>{const requestId=++sequence;waiting.set(requestId,{resolve,reject});context.self.onmessage({data:{requestId,method,args}});});}
  await context.probe.initialize();
+ const sum=await call('query',{id:'source',sql:'WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<50000) SELECT SUM(x) FROM n'});
+ assert.equal(sum[0].values[0][0],1250025000);
+ assert(activity.filter(message=>message.requestId===sequence).length>2,'SQL execution must report real activity within a single long sqlite.step, rather than only before and after it');
  const saved=await call('snapshot',{id:'source'});order.push('snapshot complete');assert(intervening,'A write ran between backup steps');await intervening;
  assert.deepEqual(order,['review saved','snapshot complete'],'Copying permits a review transaction before finishing');
  const contents=await context.probe.inspect(saved.token);assert.equal(contents.count,256);assert.equal(contents.label,'reviewed');assert.equal(contents.integrity,'ok');
- console.log('Bundled SQLite incremental backup permits writes and produces an intact, current snapshot.');
+ console.log('Bundled SQLite reports activity within long statements; incremental backup permits writes and produces an intact, current snapshot.');
 })().catch(error=>{console.error(error);process.exitCode=1;});
