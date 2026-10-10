@@ -22,7 +22,13 @@
  };
  class Snapshot {
   constructor(value){this.token=value.token;this.size=value.size;this.type='application/vnd.sqlite3';}
-  slice(start=0,end=this.size){return{arrayBuffer:async()=>{const value=await rpc('read',{token:this.token,start,end});return value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength);}};}
+  slice(start=0,end=this.size){return{arrayBuffer:async()=>{
+   if(start<0||end<start||end-start>1024*1024)throw new Error('Invalid database chunk request.');
+   const data=new Uint8Array(end-start),token=this.token;
+   // Yield at each small read so file export cannot monopolize the database worker.
+   for(let at=start;at<end;at+=128*1024){const value=await rpc('read',{token,start:at,end:Math.min(end,at+128*1024)});data.set(value,at-start);}
+   return data.buffer;
+  }};}
   async release(){if(this.token){const token=this.token;this.token=null;await rpc('release',{token});}}
   async asBlob(){const parts=[];for(let at=0;at<this.size;at+=1024*1024)parts.push(new Blob([await this.slice(at,Math.min(this.size,at+1024*1024)).arrayBuffer()]));return new Blob(parts,{type:this.type});}
  }

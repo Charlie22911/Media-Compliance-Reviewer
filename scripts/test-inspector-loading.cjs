@@ -24,7 +24,7 @@ function harness() {
     getThumbnail: hash => pending.get(hash).promise, getEvidenceRecord: key => records.get(key).promise,
     connectedMime: () => '', contentHashMethod: () => 'sha256', hashMethodLabel: () => 'SHA-256', safeDate: String, formatBytes: String,
     joinDisplayPath: (_root, value) => value, renderLocationPage: async value => {node('#locations').textContent = value.key;},
-    setMetadataValue() {}, applyZoom() {}, evidenceMetadataCache: new Map(), evidencePreviewCache: new Map()};
+    setMetadataValue() {}, applyZoom() {}, logActivity() {}, evidenceMetadataCache: new Map(), evidencePreviewCache: new Map()};
   vm.createContext(context);vm.runInContext(fs.readFileSync(path.join(base, 'src/media-reviewer-core.js'), 'utf8'), context);context.C = context.ImageReviewerCore;
   for (const name of ['resetInspectorVideo', 'resetInspectorMedia', 'beginInspectorRender', 'renderEvidenceInspector', 'renderInspector']) {
     const code = new RegExp('(?:async )?function ' + name + '\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}').exec(app);
@@ -37,15 +37,31 @@ function expectLoading(test, name, message) {
   assert.equal(test.node('#inspect-image').src, '');assert.equal(test.node('#inspect-image').onload, null);
   assert(test.node('#inspect-video').classList.contains('hidden'));assert(test.node('#inspect-video').paused);
   assert.equal(test.node('#inspect-title').textContent, name + '.jpg');assert.equal(test.node('#review-notes').value, name + ' notes');
-  assert.equal(test.node('#metadata-list').innerHTML, '');assert.equal(test.node('#locations').innerHTML, '');
+  assert(!test.node('#metadata-list').innerHTML.includes('Previous'));assert(!test.node('#locations').innerHTML.includes('Previous'));
   assert.equal(test.node('#inspect-placeholder').textContent, message);assert(test.revoked.includes('blob:previous'));
 }
 (async () => {
   {
+    const test=harness(),thumbnail=deferred(),locations=deferred(),item=test.context.visibleCards[0].occurrences[0];test.pending.set('current',thumbnail);
+    test.context.previewOccurrence=()=>item;test.context.connectedFile=async()=>new Blob(['original'],{type:'image/jpeg'});
+    test.context.C.checkPreviewInput=async()=>({width:12,height:20});test.context.renderLocationPage=()=>locations.promise;
+    const rendering=test.context.renderInspector();
+    await Promise.race([rendering,new Promise((_,reject)=>setTimeout(()=>reject(Error('A connected original still waits for database thumbnail/location reads')),100))]);
+    assert(test.node('#inspect-image').src,'The original opens while thumbnail and location queries remain pending');
+    assert(!test.node('#inspect-image').classList.contains('hidden'));
+    test.context.inspectRenderToken++;thumbnail.resolve(null);locations.resolve();
+  }
+  {
+    const test=harness(),locations=deferred();test.context.visibleCards[0].savedPreview={blob:new Blob(['cached'],{type:'image/jpeg'}),mime:'image/jpeg',width:12,height:20};
+    test.context.getThumbnail=()=>{throw Error('An already displayed thumbnail must not be read from the database again');};test.context.renderLocationPage=()=>locations.promise;
+    await test.context.renderInspector();assert(test.node('#inspect-image').src,'A disconnected current-page item uses its cached thumbnail without database reads');
+    test.context.inspectRenderToken++;locations.resolve();
+  }
+  {
     const test = harness(), wait = deferred();test.pending.set('current', wait);
     const rendering = test.context.renderInspector();expectLoading(test, 'current', 'Loading preview…');
-    test.context.inspectRenderToken++;wait.resolve(null);await rendering;
-    assert.equal(test.node('#metadata-list').innerHTML, '', 'Closing during a read must prevent late detail updates');assert.equal(test.urls.length, 0);
+    const details=test.node('#metadata-list').innerHTML;test.context.inspectRenderToken++;wait.resolve(null);await rendering;
+    assert.equal(test.node('#metadata-list').innerHTML, details, 'Closing during a read must prevent late detail updates');assert.equal(test.urls.length, 0);
   }
   {
     const test = harness(), old = deferred(), next = deferred();test.pending.set('current', old);test.pending.set('next', next);

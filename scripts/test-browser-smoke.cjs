@@ -7,7 +7,7 @@ let chrome,socket,sequence=0,stderr='',currentView;const pending=new Map(),conte
 async function waitFor(check,label,timeout=20000){const end=Date.now()+timeout;while(Date.now()<end){const value=await check();if(value)return value;await delay(100);}throw Error('Timed out: '+label+'; errors: '+JSON.stringify(errors));}
 function call(method,params={},sessionId){return new Promise((resolve,reject)=>{const id=++sequence;pending.set(id,{resolve,reject});socket.send(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})}));});}
 async function evaluate(sessionId,contextId,expression){const result=await call('Runtime.evaluate',{contextId,expression,returnByValue:true,awaitPromise:true},sessionId);if(result.exceptionDetails)throw Error(result.exceptionDetails.exception?.description||result.exceptionDetails.text);return result.result.value;}
-const filePickerShim=`(()=>{let bytes=new Uint8Array(),modified=Date.now();window.confirm=()=>true;window.__testFileSize=()=>bytes.byteLength;const handle={kind:'file',name:'startup-test.sqlite',queryPermission:async()=> 'granted',requestPermission:async()=> 'granted',getFile:async()=>{if(window.__testNextFileRead){const paused=window.__testNextFileRead;window.__testNextFileRead=null;await paused;}return new File([bytes],'startup-test.sqlite',{lastModified:modified});},createWritable:async()=>{const parts=[];return{write:async data=>parts.push(new Uint8Array(data)),close:async()=>{const size=parts.reduce((n,p)=>n+p.byteLength,0);bytes=new Uint8Array(size);let at=0;for(const part of parts){bytes.set(part,at);at+=part.byteLength;}modified=Date.now();},abort:async()=>{}};}};window.showSaveFilePicker=async()=>{if(window.__testCancelSave){window.__testCancelSave=false;throw new DOMException('Picker cancelled','AbortError');}return handle;};window.showOpenFilePicker=async()=>[handle];})();`;
+const filePickerShim=`(()=>{let bytes=new Uint8Array(),modified=Date.now();window.confirm=()=>true;window.__testFileSize=()=>bytes.byteLength;const handle={kind:'file',name:'startup-test.sqlite',queryPermission:async()=> 'granted',requestPermission:async()=> 'granted',getFile:async()=>{if(window.__testNextFileRead){const paused=window.__testNextFileRead;window.__testNextFileRead=null;await paused;}return new File([bytes],'startup-test.sqlite',{lastModified:modified});},createWritable:async()=>{const parts=[];return{write:async data=>{if(window.__testFileWriteGate){window.__testFileWriteWaiting=true;await window.__testFileWriteGate;}parts.push(new Uint8Array(data));},close:async()=>{const size=parts.reduce((n,p)=>n+p.byteLength,0);bytes=new Uint8Array(size);let at=0;for(const part of parts){bytes.set(part,at);at+=part.byteLength;}modified=Date.now();},abort:async()=>{}};}};window.showSaveFilePicker=async()=>{if(window.__testCancelSave){window.__testCancelSave=false;throw new DOMException('Picker cancelled','AbortError');}return handle;};window.showOpenFilePicker=async()=>[handle];})();`;
 const scanFolderShim=`(async()=>{
  const modified=1700000000000;
  async function png(name,color){const canvas=document.createElement('canvas');canvas.width=12;canvas.height=20;const paint=canvas.getContext('2d');paint.fillStyle=color;paint.fillRect(0,0,12,20);const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));return new File([blob],name,{type:'image/png',lastModified:modified});}
@@ -77,9 +77,17 @@ async function findAppView(rootSession,expression,label){return waitFor(async()=
    assert(await evaluate(appSession,appContext,"(()=>{document.getElementById('log-button').click();const okay=!document.getElementById('log-content').textContent.includes('Preview dimensions could not be read safely');document.getElementById('log-dialog').close();return okay;})()"),'Recycle-bin metadata must not be decoded or create false preview warnings');
    assert.deepEqual(await evaluate(appSession,appContext,"Array.from(document.querySelectorAll('.bucket .count'),node=>Number(node.textContent))"),[3,0,0,0],'Bucket tabs show overall totals');
    assert(await evaluate(appSession,appContext,"!document.querySelector('.bucket small')"),'Bucket tabs omit filtered-count labels');
+   await evaluate(appSession,appContext,"window.__testNativeExec=MediaDatabase.Database.prototype.exec;window.__testDatabaseGate=new Promise(resolve=>window.__testReleaseDatabase=resolve);MediaDatabase.Database.prototype.exec=function(...args){return window.__testDatabaseGate.then(()=>window.__testNativeExec.apply(this,args));};void 0");
+   try{
+    await evaluate(appSession,appContext,"document.querySelector('#results .card-foot button').click()");
+    await waitFor(()=>evaluate(appSession,appContext,"(()=>{const img=document.getElementById('inspect-image');return !img.classList.contains('hidden')&&img.complete&&img.naturalWidth>0&&document.getElementById('metadata-list').textContent.includes('Original source · folder reconnected');})()"),'current-page original preview without database reads',5000);
+   }finally{
+    await evaluate(appSession,appContext,"MediaDatabase.Database.prototype.exec=window.__testNativeExec;window.__testReleaseDatabase();document.getElementById('inspect-dialog').close()");
+   }
+   console.log(edition+': current-page original inspection passed with database reads paused');
    for(const index of [0,1]){
     const state=await evaluate(appSession,appContext,`(()=>{document.getElementById('inspect-dialog').close();const card=document.querySelectorAll('#results .card')[${index}];const name=card.querySelector('.filename').textContent;card.querySelector('.card-foot button').click();const image=document.getElementById('inspect-image');return{name,title:document.getElementById('inspect-title').textContent,hidden:image.classList.contains('hidden'),source:image.getAttribute('src'),details:document.getElementById('metadata-list').textContent,loading:document.getElementById('inspect-placeholder').textContent};})()`);
-    assert.equal(state.title,state.name);assert(state.hidden,'Old previews clear before loading the next item');assert.equal(state.source,null);assert.equal(state.details,'');assert.equal(state.loading,'Loading preview…');
+    assert.equal(state.title,state.name);assert(state.hidden,'Old previews clear before loading the next item');assert.equal(state.source,null);assert(state.details.includes(state.name),'Current item details are available immediately');assert.equal(state.loading,'Loading preview…');
     await waitFor(()=>evaluate(appSession,appContext,"(()=>{const image=document.getElementById('inspect-image');return document.getElementById('inspect-dialog').open&&!image.classList.contains('hidden')&&image.complete&&image.naturalWidth>0;})()"),'inspected preview loads after close/reopen');
    }
    await evaluate(appSession,appContext,"document.getElementById('inspect-dialog').close()");
@@ -90,7 +98,7 @@ async function findAppView(rootSession,expression,label){return waitFor(async()=
      const paint=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
      const spacer=document.createElement('div');spacer.style.cssText='height:2400px;grid-column:1/-1';document.getElementById('results').append(spacer);
      try{
-      window.scrollTo(0,0);document.querySelector('#results .card-check').click();await paint();
+      await paint();window.scrollTo(0,0);await paint();document.querySelector('#results .card-check').click();await paint();
       const bar=document.getElementById('selectionbar'),header=document.querySelector('.app-head'),initial=bar.getBoundingClientRect().top;
       window.scrollTo(0,initial+300);await paint();
       const box=bar.getBoundingClientRect(),inset=getComputedStyle(header).position==='sticky'?header.getBoundingClientRect().bottom:0;
@@ -98,7 +106,7 @@ async function findAppView(rootSession,expression,label){return waitFor(async()=
       return{initial,top:box.top,inset,height:box.height,width:innerWidth,viewport:innerHeight,toolbarBottom:document.querySelector('.toolbar').getBoundingClientRect().bottom,bottomBar:!!document.querySelector('.bulkbar'),buttonsInside:buttons.every(button=>{const b=button.getBoundingClientRect();return b.left>=box.left-1&&b.right<=box.right+1&&b.top>=box.top-1&&b.bottom<=box.bottom+1;})};
      }finally{spacer.remove();window.scrollTo(0,0);document.getElementById('clear-selection').click();}
     })()`);
-    assert(geometry.initial>geometry.inset+20,'The action bar starts below the result controls');
+    assert(geometry.initial>geometry.inset+20,'The action bar starts below the result controls: '+JSON.stringify(geometry));
     assert(Math.abs(geometry.top-geometry.inset)<2,edition+': selected-item actions must remain at the top while scrolling: '+JSON.stringify(geometry));
     assert(geometry.toolbarBottom<=geometry.inset+1,'Search and thumbnail controls scroll away before the action bar sticks');
     assert(geometry.height<geometry.viewport-geometry.inset&&geometry.buttonsInside,'Wrapped action buttons stay visible at '+width+' pixels');
@@ -106,8 +114,17 @@ async function findAppView(rootSession,expression,label){return waitFor(async()=
    }
    await call('Emulation.clearDeviceMetricsOverride',{},sessionId);
    console.log(edition+': sticky selected-item actions and wrapping passed at 1024x768 and 800x768');
-   await completeAction('review one item',"document.querySelector('#results .card-check').click();document.querySelector('[data-bulk=COMPLIANT]').click()","document.querySelectorAll('#results .card').length===2");
-   await completeAction('save review decision',"document.getElementById('save-workspace').click()","document.getElementById('toast').textContent.includes('Database saved.')");
+   await evaluate(sessionId,rootContext,"window.__testFileWriteWaiting=false;window.__testFileWriteGate=new Promise(resolve=>window.__testReleaseFileWrite=resolve);void 0");
+   try{
+    await completeAction('save while reviewing',"document.getElementById('save-workspace').click()","document.getElementById('operation-status').textContent.includes('Saving database: Writing')");
+    await waitFor(()=>evaluate(sessionId,rootContext,"window.__testFileWriteWaiting"),'portable file write is waiting');
+    await completeAction('review one item during file saving',"document.querySelector('#results .card-check').click();document.querySelector('[data-bulk=COMPLIANT]').click()","document.querySelectorAll('#results .card').length===2");
+   }finally{
+    await evaluate(sessionId,rootContext,"window.__testFileWriteGate=null;window.__testReleaseFileWrite()");
+   }
+   await completeAction('finish save while reviewing','void 0',"!document.getElementById('operation-status').textContent.includes('Saving database')");
+   await completeAction('save review decision',"document.getElementById('save-workspace').click()","document.getElementById('toast').textContent.includes('Database saved.')&&!document.getElementById('operation-status').textContent.includes('Saving database')");
+   console.log(edition+': bucket changes remained available during a paused portable-file write');
    console.log(edition+': scan, exclusions, recycle-bin metadata/content, duplicate grouping, saved previews and bucket review passed');
   }
   await completeAction('reopen database',"document.getElementById('open-workspace-button').click();document.getElementById('open-workspace-button').click()","!document.getElementById('database-opening-dialog').open&&document.getElementById('toast').textContent.includes('Database opened')");

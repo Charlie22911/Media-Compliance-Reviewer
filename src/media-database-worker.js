@@ -2,7 +2,7 @@ import SQLiteFactory from '../vendor/wa-sqlite/dist/wa-sqlite-async.mjs';
 import * as SQLite from '../vendor/wa-sqlite/src/sqlite-api.js';
 import {IDBBatchAtomicVFS} from '../vendor/wa-sqlite/src/examples/IDBBatchAtomicVFS.js';
 
-const STORAGE='photo-audit-sqlite-pages-v1',CHUNK=1024*1024;
+const STORAGE='photo-audit-sqlite-pages-v1',CHUNK=1024*1024,SNAPSHOT_STEP_BYTES=32*1024;
 let engine,sqlite,vfs,storage,activeRequestId=null,lastProgressAt=0,lastActivityAt=0,activePhase='',activeStartedAt=0;
 const requests=[],backups=new Map(),DEFERRED=Symbol('incremental snapshot');
 let pumping=false;
@@ -131,11 +131,13 @@ class Database {
   try{
    const pointer=await sqlite.open_v2(path,SQLite.SQLITE_OPEN_READWRITE|SQLite.SQLITE_OPEN_CREATE,'media-idb');
    destination=new Database('snapshot',path,pointer);
-   await destination.run('PRAGMA page_size='+pageSize+'; PRAGMA cache_size=-8192; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');
+   // This copy is disposable; the live database keeps synchronous=FULL.
+   await destination.run('PRAGMA page_size='+pageSize+'; PRAGMA cache_size=-64; PRAGMA cache_spill=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=NORMAL;');
    await destination.clear();
    handle=engine.ccall('sqlite3_backup_init','number',['number','string','number','string'],[pointer,'main',this.pointer,'main']);
    if(!handle)throw new Error(sqlite.errmsg(pointer));
-   backups.set(this.id,{source:this,destination,handle,path,requestId,pages:Math.max(1,Math.floor(256*1024/pageSize)),pageSize,busyRetries:0});
+   const maxPages=Math.max(1,Math.floor(SNAPSHOT_STEP_BYTES/pageSize));
+   backups.set(this.id,{source:this,destination,handle,path,requestId,pages:maxPages,maxPages,pageSize,busyRetries:0});
    return DEFERRED;
   }catch(error){
    if(handle)await engine.ccall('sqlite3_backup_finish','number',['number'],[handle],{async:true});
@@ -233,12 +235,22 @@ async function stepBackup(backup){
  try{
   // Asyncify permits one SQLite call at a time. Source transactions and review
   // writes run between these bounded steps, never during a suspended WASM call.
+  const started=globalThis.performance?.now()??Date.now();
   const result=await engine.ccall('sqlite3_backup_step','number',['number','number'],[backup.handle,backup.pages],{async:true});
   if(result===SQLite.SQLITE_BUSY||result===SQLite.SQLITE_LOCKED){
    if(++backup.busyRetries>3)throw new Error('The database remained busy while preparing a snapshot.');
    backup.retryAt=Date.now()+250*2**(backup.busyRetries-1);return;
   }
   if(result!==SQLite.SQLITE_OK&&result!==SQLite.SQLITE_DONE)throw new Error(sqlite.errmsg(backup.destination.pointer));
+  // jWrite queues browser storage work. Drain it before yielding or copying
+  // more pages, otherwise later foreground requests inherit the whole backlog.
+  for(const [fileId,file]of vfs.mapIdToFile)if(file.path===backup.path){
+   const flushed=await vfs.jSync(fileId,SQLite.SQLITE_SYNC_NORMAL);
+   if(flushed!==SQLite.SQLITE_OK)throw new Error('Snapshot storage flush failed: '+(vfs.lastError?.message||flushed));
+  }
+  const elapsed=(globalThis.performance?.now()??Date.now())-started;
+  if(elapsed>50)backup.pages=Math.max(1,Math.floor(backup.pages/2));
+  else if(elapsed<15)backup.pages=Math.min(backup.maxPages,backup.pages+1);
   backup.busyRetries=0;backup.retryAt=0;
   const total=engine._sqlite3_backup_pagecount(backup.handle),remaining=engine._sqlite3_backup_remaining(backup.handle);
   progress('Preparing snapshot',(total-remaining)*backup.pageSize,total*backup.pageSize);

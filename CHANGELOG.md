@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.3.11 — October 10, 2026
+
+- Open connected originals and current-page cached previews without waiting for thumbnail or location queries. Load additional inspector locations separately.
+- Copy snapshots in smaller adaptive batches and drain pending snapshot-storage writes between them. Limit the temporary copy's SQLite cache to reduce accumulated storage work; keep the working database's durability settings unchanged.
+- Read saved snapshots in smaller pieces so bucket changes can run between export reads.
+- Update Help with preview and save behavior.
+
 ## 3.3.10 — October 10, 2026
 
 - Report actual SQL execution and completed storage calls during long database requests, keeping active Forge requests from hitting the inactivity deadline. Show lengthy database activity in the fixed Activity panel.

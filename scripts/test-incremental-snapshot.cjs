@@ -6,10 +6,17 @@ const root=path.join(__dirname,'..');
  const worker=fs.readFileSync(path.join(root,'src/media-database-worker.js'),'utf8');
  const probe=`
  import {MemoryAsyncVFS} from '../vendor/wa-sqlite/src/examples/MemoryAsyncVFS.js';
+ let queuedBytes=0,maxQueuedBytes=0,storageDrains=0;
  globalThis.probe={
   async initialize(){
    engine=await SQLiteFactory({wasmBinary:globalThis.testWasm});sqlite=SQLite.Factory(engine);
-   vfs=new MemoryAsyncVFS('media-idb',engine);await vfs.isReady();sqlite.vfs_register(vfs,true);
+   vfs=new MemoryAsyncVFS('media-idb',engine);await vfs.isReady();
+   const open=vfs.jOpen.bind(vfs);vfs.jOpen=async(...args)=>{const result=await open(...args);const file=vfs.mapIdToFile.get(args[1]);if(file)file.path=file.pathname;return result;};
+   // The persistent VFS queues writes; sqlite3_backup_step returning does not
+   // imply that the browser has finished writing those pages.
+   const write=vfs.jWrite.bind(vfs);vfs.jWrite=async(...args)=>{if(vfs.mapIdToFile.get(args[0])?.pathname.startsWith('/snapshot-')){queuedBytes+=args[1].byteLength;maxQueuedBytes=Math.max(maxQueuedBytes,queuedBytes);}return write(...args);};
+   vfs.jSync=async()=>{queuedBytes=0;storageDrains++;return SQLite.SQLITE_OK;};
+   sqlite.vfs_register(vfs,true);
    removeFile=async path=>{vfs.mapNameToFile.delete(path);};
    const pointer=await sqlite.open_v2('/source.sqlite',SQLite.SQLITE_OPEN_READWRITE|SQLite.SQLITE_OPEN_CREATE,'media-idb');
    const database=new Database('source','/source.sqlite',pointer);databases.set('source',database);
@@ -17,6 +24,7 @@ const root=path.join(__dirname,'..');
    for(let id=1;id<=256;id++)await database.run("INSERT INTO photos VALUES (?, 'original', zeroblob(16384))",[id]);
    await database.run('COMMIT');
   },
+  statistics(){return {maxQueuedBytes,storageDrains};},
   async inspect(token){
    const value=snapshots.get(token),pointer=await sqlite.open_v2(value.path,SQLite.SQLITE_OPEN_READWRITE,'media-idb');
    const database=new Database('inspection',value.path,pointer);
@@ -27,7 +35,7 @@ const root=path.join(__dirname,'..');
  const resolver={name:'workspace-source',setup(build){build.onResolve({filter:/.*/},args=>args.path.startsWith('node:')?{path:args.path,external:true}:{path:path.resolve(args.resolveDir||root,args.path),namespace:'workspace-source'});build.onLoad({filter:/.*/,namespace:'workspace-source'},args=>({contents:fs.readFileSync(args.path,'utf8'),loader:'js',resolveDir:path.dirname(args.path)}));}};
  const result=await esbuild.build({stdin:{contents:worker+'\n'+probe,resolveDir:path.join(root,'src'),sourcefile:'snapshot-probe.js'},plugins:[resolver],bundle:true,write:false,format:'iife',platform:'node',define:{'import.meta.url':JSON.stringify('file:///snapshot-probe.mjs')},logLevel:'silent'});
  let sequence=0,intervening=null,clock=Date.now();const waiting=new Map(),order=[],activity=[];
- const context={require,process,console,setTimeout,clearTimeout,URL,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,DataView,WebAssembly,atob,crypto:require('crypto').webcrypto,testWasm:fs.readFileSync(path.join(root,'vendor/wa-sqlite/dist/wa-sqlite-async.wasm'))};
+ const context={require,process,console,setTimeout,clearTimeout,performance,URL,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,DataView,WebAssembly,atob,crypto:require('crypto').webcrypto,testWasm:fs.readFileSync(path.join(root,'vendor/wa-sqlite/dist/wa-sqlite-async.wasm'))};
  context.Date=class extends Date{static now(){return clock+=250;}};
  context.self={postMessage(message){
   if(message.progress){
@@ -47,6 +55,8 @@ const root=path.join(__dirname,'..');
  assert(activity.filter(message=>message.requestId===sequence).length>2,'SQL execution must report real activity within a single long sqlite.step, rather than only before and after it');
  const saved=await call('snapshot',{id:'source'});order.push('snapshot complete');assert(intervening,'A write ran between backup steps');await intervening;
  assert.deepEqual(order,['review saved','snapshot complete'],'Copying permits a review transaction before finishing');
+ const statistics=context.probe.statistics();
+ assert(statistics.maxQueuedBytes<=128*1024,'Snapshot copying must drain queued storage writes in small steps, rather than building a large I/O backlog: '+JSON.stringify(statistics));
  const contents=await context.probe.inspect(saved.token);assert.equal(contents.count,256);assert.equal(contents.label,'reviewed');assert.equal(contents.integrity,'ok');
  console.log('Bundled SQLite reports activity within long statements; incremental backup permits writes and produces an intact, current snapshot.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

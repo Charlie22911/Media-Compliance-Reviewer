@@ -7,7 +7,7 @@ const extract=name=>{const match=new RegExp('(?:async )?function '+name+'\\([^)]
 (async()=>{
  let completeSnapshot;const calls=[];
  const context={crypto:require('crypto').webcrypto,setTimeout,clearTimeout,CustomEvent:class{},dispatchEvent(){},
-  __MediaDatabaseRPC:async(method)=>{calls.push(method);if(method==='snapshot')return new Promise(resolve=>completeSnapshot=()=>resolve({token:'saved',size:1}));return[];}};
+  __MediaDatabaseRPC:async(method,args)=>{calls.push(method);if(method==='snapshot')return new Promise(resolve=>completeSnapshot=()=>resolve({token:'saved',size:1}));if(method==='read'){assert(args.end-args.start<=128*1024,'File export reads must leave small scheduling gaps for foreground work');return new Uint8Array(args.end-args.start).fill(Math.floor(args.start/(128*1024)));}return[];}};
  vm.createContext(context);vm.runInContext(client,context);
  const database=new context.MediaDatabase.Database('db'),saving=database.exportBlob();
  while(!completeSnapshot)await new Promise(resolve=>setTimeout(resolve,0));
@@ -17,6 +17,8 @@ const extract=name=>{const match=new RegExp('(?:async )?function '+name+'\\([^)]
   assert(calls.includes('begin'),'A review transaction starts before snapshot copying finishes');
   await database.run('COMMIT');
  }finally{completeSnapshot();await saving;}
+ const chunk=new Uint8Array(await new context.MediaDatabase.Snapshot({token:'export',size:1024*1024}).slice(0,1024*1024).arrayBuffer());
+ assert.equal(chunk.length,1024*1024);for(let at=0;at<8;at++)assert(chunk.subarray(at*128*1024,(at+1)*128*1024).every(value=>value===at),'Export chunks are reassembled in the correct order');
  const actions=[],pendingReviewKeys=new Set();let finishFirst;
  const review={Set,Promise,reviewActionInFlight:false,reviewQueue:[],pendingReviewKeys,db:{},ws:{},activeBucket:'TO_REVIEW',
   renderSelection(){},renderScanActivity(){},showOperation(){},finishOperation(){},toast(){},

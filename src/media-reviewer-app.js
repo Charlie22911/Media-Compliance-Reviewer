@@ -1169,12 +1169,12 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   async function thumbnailUrl(hash) {
     const thumb = await getThumbnail(hash);
     if (!thumb) return null;
-    const url = URL.createObjectURL(new Blob([thumb.bytes], {
+    const blob = new Blob([thumb.bytes], {
       type: thumb.mime
-    }));
+    }),url = URL.createObjectURL(blob);
     await renderedThumbnailUrls.add(url);
     return {
-      url, width: thumb.width, height: thumb.height
+      url, blob, mime: thumb.mime, width: thumb.width, height: thumb.height
     };
   }
   async function evidencePreviewUrl(key) {
@@ -3142,6 +3142,7 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
     const saved = card.decision.status === 'EVIDENCE' ?
     (await evidencePreviewUrl(card.key)) || (await thumbnailUrl(o.hash)) : await thumbnailUrl(o.hash);
     if (saved) {
+      if (card.decision.status !== 'EVIDENCE') card.savedPreview = {blob:saved.blob,mime:saved.mime,width:saved.width,height:saved.height};
       const img = document.createElement('img');
       img.alt = 'Preview of ' + o.name;
       img.draggable = false;
@@ -4909,9 +4910,11 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       img = $('#inspect-image'),video = $('#inspect-video'),
       placeholder = $('#inspect-placeholder'),po = previewOccurrence(card),
       mediaKind = C.mediaKindForExtension(o.extension),
-      locationUrl = po || mediaKind === 'video' ? null : persistedFileUrl(o),saved = await getThumbnail(o.hash),
+      locationUrl = po || mediaKind === 'video' ? null : persistedFileUrl(o),
       root = ws.roots[o.rootId] || {
       };
+    let saved=card.savedPreview||null,savedPromise=null;
+    const loadSaved=async()=>{if(saved)return saved;if(!savedPromise)savedPromise=getThumbnail(o.hash);const preview=await savedPromise;if(token!==inspectRenderToken)return null;saved=preview;return saved;};
     if (token !== inspectRenderToken) return;
     $('#inspect-zoom-controls').classList.toggle('hidden', mediaKind === 'video');
     $('#reconnect-original').classList.toggle('hidden', Boolean(po));
@@ -4951,18 +4954,20 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       dl.append(dt, dd);
     }
     );
-    await renderLocationPage(card,token);
-    if(token !== inspectRenderToken)return;
+    // The card already has this location. Extra locations must not delay media.
+    $('#locations').textContent=o.path+(card.occurrenceCount>1?' · Loading other locations…':'');
+    renderLocationPage(card,token).catch(error=>{if(token!==inspectRenderToken)return;$('#locations').textContent=o.path+' · Other locations could not be loaded.';logActivity('warning','Inspector locations could not be loaded',String(error.message||error));});
     if (mediaKind === 'video') {
       const showPoster = async (reason) => {
         if (token !== inspectRenderToken) return;
+        await loadSaved();if(token!==inspectRenderToken)return;
         if (!saved) {
           placeholder.textContent = 'Reconnect the source folder to play this video.';
           placeholder.classList.remove('hidden');
           setMetadataValue('Preview source', 'Unavailable');
           return;
         }
-        inspectUrl = URL.createObjectURL(new Blob([saved.bytes], {
+        inspectUrl = URL.createObjectURL(saved.blob || new Blob([saved.bytes], {
           type: saved.mime
         }
         ));
@@ -5039,13 +5044,14 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
 
     const showSaved = async (reason) => {
       if (token !== inspectRenderToken) return;
+      await loadSaved();if(token!==inspectRenderToken)return;
       if (!saved) {
         await fail(C.PREVIEW_EXTENSIONS.includes(o.extension) ?
         'Original file could not be loaded and no saved preview is available.' :
         'Preview unsupported for this type.');
         return;
       }
-      inspectUrl = URL.createObjectURL(new Blob([saved.bytes], {
+      inspectUrl = URL.createObjectURL(saved.blob || new Blob([saved.bytes], {
         type: saved.mime
       }
       ));
